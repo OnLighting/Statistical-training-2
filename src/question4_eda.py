@@ -1,142 +1,188 @@
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 
-from utils import load_clean_data, longest_true_run, save_figure, set_chinese_style
-OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "04_问题4"
-def build_daily_metrics(data):
-    frame = data.loc[
-        data["timestamp"].between("2026-01-01 07:00", "2026-04-01 05:00"),
-        ["timestamp", "operating_date", "treated_ntu", "raw_water_ntu", "treated_water_flow"],
-    ].copy()
-    frame["operating_date"] = pd.to_datetime(frame["operating_date"])
+
+ROOT = Path(__file__).resolve().parents[1]
+MODEL_DIR = ROOT / "outputs" / "03_问题3" / "models"
+
+
+def _operating_dates(frame):
+    if "operating_date" in frame:
+        return pd.to_datetime(frame["operating_date"], errors="coerce").dt.normalize()
+    return (frame["timestamp"] - pd.Timedelta(hours=7)).dt.normalize()
+
+
+def _longest_exceedance_run(exceedance):
+    longest = 0
+    current = 0
+    for value in exceedance:
+        if value:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _question3_moe_predictor(frame):
+    from prob3 import Solver
+    from q3.data import prepare_q3_frame
+
+    solver = Solver().load_models()
+    prepared = prepare_q3_frame(frame)
+    prediction = pd.Series(np.nan, index=prepared.index, dtype=float)
+    missing = pd.to_numeric(prepared["treated_ntu"], errors="coerce").isna()
+    positions = np.flatnonzero(missing.to_numpy())
+    origins = []
+    targets = []
+    for position in positions:
+        origin_position = position - 1
+        if origin_position >= 24 and position + 5 < len(prepared):
+            origins.append(prepared.index[origin_position])
+            targets.append(prepared.index[position])
+    if origins:
+        bundle = solver.prediction_bundle(prepared, pd.DatetimeIndex(origins))
+        prediction.loc[targets] = bundle["prediction"][:, 0]
+    return prediction.reindex(pd.to_datetime(frame["timestamp"])).set_axis(frame.index)
+
+
+def build_daily_features(data, moe_predictor=None):
+    points = data.copy()
+    if "timestamp" not in points:
+        points = points.reset_index().rename(columns={points.index.name or "index": "timestamp"})
+    points["timestamp"] = pd.to_datetime(points["timestamp"], errors="coerce")
+    points = points.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    observed = pd.to_numeric(points["treated_ntu"], errors="coerce")
+    missing = observed.isna()
+    points["treated_ntu来源"] = np.where(missing, "MoE预测", "实测")
+    if missing.any():
+        predictor = moe_predictor or _question3_moe_predictor
+        predicted = predictor(points.copy())
+        if not isinstance(predicted, pd.Series):
+            predicted = pd.Series(predicted, index=points.index)
+        predicted = pd.to_numeric(predicted.reindex(points.index), errors="coerce")
+        observed.loc[missing] = predicted.loc[missing]
+    points["treated_ntu"] = observed
+    points["运行日期"] = _operating_dates(points)
 
     rows = []
-    for operating_date, group in frame.groupby("operating_date"):
-        group = group.sort_values("timestamp")
-        values = group["treated_ntu"].dropna()
+    for date, group in points.groupby("运行日期", sort=True):
+        values = pd.to_numeric(group["treated_ntu"], errors="coerce").dropna()
         exceedance = values.gt(1)
-        exceedance_count = int(exceedance.sum()) if values.size else np.nan
-        exceedance_hours = exceedance_count * 2 if values.size else np.nan
-        longest_hours = longest_true_run(exceedance.tolist()) * 2 if values.size else np.nan
+        count = int(exceedance.sum())
         rows.append(
             {
-                "运行日期": operating_date,
-                "有效观测数": values.size,
-                "数据完整率": values.size / 12,
-                "日均浊度": values.mean(),
-                "日中位浊度": values.median(),
-                "日最大浊度": values.max(),
-                "日超标幅度": max(values.max() - 1, 0) if not values.empty else np.nan,
-                "超标观测数": exceedance_count,
-                "超标小时数": exceedance_hours,
-                "最长连续超标小时数": longest_hours,
-                "超标观测比例": exceedance.sum() / values.size if values.size else np.nan,
-                "原水浊度日最大值": group["raw_water_ntu"].max(),
-                "出厂水流量日均值": group["treated_water_flow"].mean(),
+                "运行日期": date,
+                "有效观测数": int(values.size),
+                "实测观测数": int((group["treated_ntu来源"] == "实测").sum()),
+                "MoE预测观测数": int((group["treated_ntu来源"] == "MoE预测").sum()),
+                "M": values.max() if values.size else np.nan,
+                "F": count / values.size if values.size else np.nan,
+                "D": count * 2 if values.size else np.nan,
+                "L": _longest_exceedance_run(exceedance.tolist()) * 2 if values.size else np.nan,
             }
         )
-    daily = pd.DataFrame(rows).sort_values("运行日期")
-    daily.to_csv(OUTPUT_DIR / "表1_2026年逐日风险基础指标.csv", index=False, encoding="utf-8-sig")
-    return frame, daily
+    daily = pd.DataFrame(rows).sort_values("运行日期").reset_index(drop=True)
+    return points, daily
 
 
-def plot_daily_metrics(daily):
-    fig, axes = plt.subplots(3, 1, figsize=(12.5, 8), sharex=True)
-    axes[0].plot(daily["运行日期"], daily["日最大浊度"], color="#2166ac", marker="o", markersize=2.8, linewidth=0.9)
-    axes[0].axhline(1, color="#cb181d", linestyle="--", linewidth=1)
-    axes[0].set_ylabel("日最大浊度（NTU）")
-    axes[1].bar(daily["运行日期"], daily["日超标幅度"], color="#fc9272", width=0.85)
-    axes[1].set_ylabel("超标幅度（NTU）")
-    axes[2].bar(daily["运行日期"], daily["最长连续超标小时数"], color="#74c476", width=0.85)
-    axes[2].set_ylabel("最长持续时间（小时）")
-    axes[2].set_xlabel("运行日期")
-    save_figure(fig, OUTPUT_DIR, "图1_超标幅度与持续时间")
+def _cluster_features(frame):
+    values = frame[["M", "F", "D", "L"]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    values[:, 0] = np.log1p(values[:, 0])
+    values[:, 2] = np.log1p(values[:, 2])
+    values[:, 3] = np.log1p(values[:, 3])
+    return values
 
 
-def plot_monthly_exceedance(daily):
-    frame = daily.copy()
-    frame["月份"] = frame["运行日期"].dt.month.astype(str) + "月"
-    monthly = frame.groupby("月份").agg(
-        运行天数=("运行日期", "count"),
-        有效运行天数=("有效观测数", lambda values: int((values > 0).sum())),
-        有超标天数=("超标观测数", lambda values: int((values.dropna() > 0).sum())),
-        平均日最大浊度=("日最大浊度", "mean"),
-        平均超标小时数=("超标小时数", "mean"),
+def _fuzzy_c_means(values, clusters, seed):
+    generator = np.random.default_rng(seed)
+    membership = generator.random((len(values), clusters))
+    membership = membership / membership.sum(axis=1, keepdims=True)
+    for _ in range(300):
+        powered = membership ** 2.0
+        centers = (powered.T @ values) / powered.sum(axis=0)[:, None]
+        distance = np.linalg.norm(values[:, None, :] - centers[None, :, :], axis=2)
+        distance = np.maximum(distance, 1e-12)
+        updated = 1.0 / (distance[:, :, None] / distance[:, None, :]) ** 2.0
+        updated = updated.sum(axis=2) ** -1
+        if np.max(np.abs(updated - membership)) < 1e-8:
+            membership = updated
+            break
+        membership = updated
+    return centers, membership
+
+
+def fit_fuzzy_clusters(daily):
+    dates = pd.to_datetime(daily["运行日期"], errors="coerce")
+    eligible = (
+        dates.dt.year.eq(2025)
+        & daily["有效观测数"].eq(12)
+        & daily["实测观测数"].eq(12)
+        & pd.to_numeric(daily["M"], errors="coerce").gt(1)
     )
-    monthly["有超标天数比例"] = monthly["有超标天数"] / monthly["有效运行天数"].replace(0, np.nan)
-    monthly.to_csv(OUTPUT_DIR / "表2_月度超标概况.csv", encoding="utf-8-sig")
+    training = daily.loc[eligible, ["M", "F", "D", "L"]].copy()
+    if len(training) < 3:
+        raise ValueError("2025年完整实测超标日不足3天，无法进行三类模糊聚类")
+    transformed = _cluster_features(training)
+    median = np.median(transformed, axis=0)
+    lower = np.quantile(transformed, 0.25, axis=0)
+    upper = np.quantile(transformed, 0.75, axis=0)
+    iqr = upper - lower
+    iqr[iqr < 1e-12] = 1.0
+    scaled = (transformed - median) / iqr
+    centers, membership = _fuzzy_c_means(scaled, 3, 2026)
+    original_centers = centers * iqr + median
+    original_centers[:, 0] = np.expm1(original_centers[:, 0])
+    original_centers[:, 2] = np.expm1(original_centers[:, 2])
+    original_centers[:, 3] = np.expm1(original_centers[:, 3])
+    severity = original_centers[:, 0] + original_centers[:, 1] + original_centers[:, 2] + original_centers[:, 3]
+    ranks = np.empty(3, dtype=int)
+    ranks[np.argsort(severity)] = np.arange(1, 4)
+    return {
+        "centers": centers,
+        "median": median,
+        "iqr": iqr,
+        "cluster_ranks": ranks,
+        "train_rows": len(training),
+        "membership": membership,
+    }
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.5))
-    sns.barplot(data=monthly.reset_index(), x="月份", y="有超标天数比例", color="#9ecae1", ax=axes[0])
-    axes[0].set_xlabel("月份")
-    axes[0].set_ylabel("有超标天数比例")
-    axes[0].set_ylim(0, 1)
-    sns.barplot(data=monthly.reset_index(), x="月份", y="平均超标小时数", color="#fdae6b", ax=axes[1])
-    axes[1].set_xlabel("月份")
-    axes[1].set_ylabel("平均超标小时数")
-    save_figure(fig, OUTPUT_DIR, "图2_月度超标概况")
+
+def classify_q1(daily, model):
+    result = daily.copy()
+    values = _cluster_features(result)
+    scaled = (values - model["median"]) / model["iqr"]
+    distance = np.linalg.norm(scaled[:, None, :] - model["centers"][None, :, :], axis=2)
+    distance = np.maximum(distance, 1e-12)
+    membership = 1.0 / (distance[:, :, None] / distance[:, None, :]) ** 2.0
+    membership = membership.sum(axis=2) ** -1
+    cluster = membership.argmax(axis=1)
+    grade = model["cluster_ranks"][cluster]
+    exceedance = pd.to_numeric(result["M"], errors="coerce").gt(1).to_numpy()
+    valid = np.isfinite(values).all(axis=1)
+    result["聚类风险等级"] = np.where(exceedance & valid, grade, 0).astype(int)
+    return result
 
 
-def threshold_sensitivity(frame):
-    rows = []
-    for threshold in [0.8, 1.0, 1.2]:
-        for operating_date, group in frame.groupby("operating_date"):
-            values = group["treated_ntu"].dropna()
-            rows.append(
-                {
-                    "阈值": threshold,
-                    "运行日期": operating_date,
-                    "存在超标": bool((values > threshold).any()) if len(values) else np.nan,
-                    "超标比例": (values > threshold).mean() if len(values) else np.nan,
-                }
-            )
-    result = pd.DataFrame(rows)
-    summary = result.groupby("阈值").agg(
-        有超标天数=("存在超标", lambda values: values.sum(min_count=1)),
-        有效运行天数=("存在超标", "count"),
-        平均超标观测比例=("超标比例", "mean"),
+def fuse_grades(daily):
+    result = daily.copy()
+    maximum = pd.to_numeric(result["M"], errors="coerce")
+    duration = pd.to_numeric(result["D"], errors="coerce")
+    baseline = np.where(
+        maximum.le(1),
+        0,
+        np.where(
+            maximum.gt(3) | duration.gt(6),
+            3,
+            np.where(maximum.gt(2) | duration.gt(2), 2, 1),
+        ),
     )
-    summary["有超标天数比例"] = summary["有超标天数"] / summary["有效运行天数"].replace(0, np.nan)
-    summary.to_csv(OUTPUT_DIR / "表3_阈值敏感性.csv", encoding="utf-8-sig")
-
-    fig, ax = plt.subplots(figsize=(7.5, 4.5))
-    sns.barplot(data=summary.reset_index(), x="阈值", y="有超标天数比例", color="#bcbddc", ax=ax)
-    ax.set_xlabel("浊度阈值（NTU）")
-    ax.set_ylabel("有超标天数比例")
-    ax.set_ylim(0, 1)
-    save_figure(fig, OUTPUT_DIR, "图3_阈值敏感性")
-
-
-def plot_hour_date_heatmap(frame):
-    heatmap_data = frame.copy()
-    heatmap_data["运行日期"] = pd.to_datetime(heatmap_data["operating_date"])
-    heatmap_data["运行小时"] = (heatmap_data["timestamp"].dt.hour - 7) % 24
-    pivot = heatmap_data.pivot_table(index="运行日期", columns="运行小时", values="treated_ntu", aggfunc="median")
-    pivot = pivot.reindex(columns=range(0, 24, 2))
-    pivot.columns = [f"{(hour + 7) % 24:02d}:00" for hour in pivot.columns]
-
-    fig, ax = plt.subplots(figsize=(11, 9))
-    sns.heatmap(pivot, cmap="YlOrRd", vmin=0, center=1, ax=ax, cbar_kws={"label": "出厂水浊度（NTU）"})
-    ax.set_xlabel("运行时刻")
-    ax.set_ylabel("运行日期")
-    save_figure(fig, OUTPUT_DIR, "图4_逐日逐时浊度热力图")
-
-
-def main():
-    set_chinese_style()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    data = load_clean_data()
-    frame, daily = build_daily_metrics(data)
-    plot_daily_metrics(daily)
-    plot_monthly_exceedance(daily)
-    threshold_sensitivity(frame)
-    plot_hour_date_heatmap(frame)
-    print(f"问题4探索性分析已保存至：{OUTPUT_DIR}")
-
-
-if __name__ == "__main__":
-    main()
+    if "聚类风险等级" in result:
+        cluster = pd.to_numeric(result["聚类风险等级"], errors="coerce").fillna(0).to_numpy(dtype=int)
+    else:
+        cluster = np.zeros(len(result), dtype=int)
+    result["基准风险等级"] = baseline.astype(int)
+    result["最终风险等级"] = np.where(baseline == 0, 0, np.maximum(baseline, cluster)).astype(int)
+    return result
