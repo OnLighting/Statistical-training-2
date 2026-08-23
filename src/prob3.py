@@ -27,8 +27,7 @@ from q3.data import (
 from q3.evaluation import long_gap_backtest, metric_table
 from q3.gru_expert import GRUExpert, GRUNet
 from q3.mechanistic import MechanisticExpert
-from q3.moe import GATE_FEATURE_NAMES, SoftmaxGate, _expand_gate_features, _gate_feature_matrix, \
-    generate_oof_predictions
+from q3.moe import GATE_FEATURE_NAMES, SoftmaxGate, _expand_gate_features, _gate_feature_matrix, generate_oof_predictions
 from q3.tree_expert import LightGBMExpert
 from utils import label, load_clean_data, save_figure, set_chinese_style
 
@@ -119,7 +118,6 @@ class Solver:
         self.write_outputs()
         print('plotting')
         self.plot_outputs()
-
     def fit_upstream_arx(self, frame, train_end):
         filtered = pd.to_numeric(frame["filtered_ntu"], errors="coerce")
         values = build_lag(frame,filtered)
@@ -284,7 +282,30 @@ class Solver:
             "files": [self.file_record(path) for path in files],
         }
         (MODEL_DIR / "model_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf")
+        self._save_result_payload()
         return manifest
+    def _save_result_payload(self):
+        result = getattr(self, "result", None)
+        if not result:
+            return None
+        path = MODEL_DIR / "result_payload.pkl"
+        payload = {}
+        for key, value in result.items():
+            try:
+                payload[key] = value
+            except Exception:
+                continue
+        payload["_meta"] = {
+            "train_start": str(getattr(self, "train_start", "")),
+            "train_end": str(getattr(self, "train_end", "")),
+            "saved_at": pd.Timestamp.now().isoformat(),
+        }
+        joblib.dump(payload, path)
+        return path
+    @staticmethod
+    def load_result_payload(path=None):
+        path = Path(path) if path is not None else MODEL_DIR / "result_payload.pkl"
+        return joblib.load(path)
     def load_models(self):
         manifest_path = MODEL_DIR / "model_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf"))
@@ -824,7 +845,7 @@ class Solver:
             baseline = baseline_all[date_number]
             for name, scenario in scenarios.items():
                 path = baseline if name == "基准" \
-                    else self.target_prediction_arrays(self.scenario_filtered_frame(frame, scenario))[2]
+                    else self.target_prediction_arrays(self.scenario_filtered_frame(frame, scenario))[2][date_number]
                 difference = path - baseline
                 summary = self.summarize_response(baseline, difference)
                 samples = bootstrap.loc[
@@ -965,7 +986,7 @@ class Solver:
             if "权重和" in gate_output:
                 gate_output["权重和"] = 1.0
         tables = (
-            ("表1_分步长模型评价.csv", self.result["metrics"]),
+            ("表2_分步长模型评价.csv", self.result["metrics"]),
             ("表3_长缺失回测.csv", self.result["gap_backtest"]),
             ("表4_门控权重统计.csv", gate_output),
             ("表6_工艺敏感性分析.csv", self.result["sensitivity"]),
@@ -990,7 +1011,8 @@ class Solver:
         save_figure(fig, OUTPUT_DIR, "图3_分步长模型误差")
         gate = self.result["gate_weights"].set_index("预测步长/小时")
         fig, ax = plt.subplots(figsize=(8.8, 4.8))
-        gate[["机理专家权重", "LightGBM权重", "GRU权重"]].plot(kind="bar", stacked=True, ax=ax, width=0.75)
+        gate = gate.rename(columns={"机理专家权重": "机理专家","LightGBM权重": "LightGBM","GRU权重": "GRU"})
+        gate[["机理专家", "LightGBM", "GRU"]].plot(kind="bar", stacked=True, ax=ax, width=0.75)
         ax.set_xlabel("预测步长/h")
         ax.set_ylabel("平均门控权重")
         plt.setp(ax.get_xticklabels(), rotation=0, ha="center")
@@ -1019,8 +1041,9 @@ class Solver:
             interval_ax.errorbar(x, center, yerr=error, fmt="o", color="#4C78A8", capsize=2)
             interval_ax.axhline(0.0, color="#555555", linewidth=0.8)
             interval_ax.set_xticks(x, group["情景"], rotation=48, ha="right")
-            interval_ax.set_xlabel("工艺情景")
             titles = ["基准"] + [f"变体{i + 1}" for i in range(len(group) - 1)]
+            interval_ax.set_xticks(x,titles,rotation=30,ha="right")
+            interval_ax.set_xlabel("工艺情景")
             for label_text, real_scenario in zip(titles, group["情景"].tolist()):
                 scenario_mapping_records.append(
                     {
@@ -1049,11 +1072,7 @@ class Solver:
             .sort_values("平均绝对SHAP值")
         )
         shap_global["特征中文"] = shap_global["特征"].map(lambda name: label(name))
-        fig, ax = plt.subplots(figsize=(9.0, 6.2))
-        ax.barh(shap_global["特征中文"], shap_global["平均绝对SHAP值"], color="#59A14F")
-        ax.set_xlabel("平均绝对SHAP值")
-        ax.set_ylabel("特征")
-        save_figure(fig, OUTPUT_DIR, "图6_SHAP全局重要度")
+
         dependence = self.result["shap_dependence"]
         dependence["特征中文"] = dependence["特征"].map(lambda name: label(name))
         features = list(dependence["特征中文"].drop_duplicates())
@@ -1074,7 +1093,7 @@ class Solver:
             pad=0.04,
             label="预测步长/h",
         )
-        save_figure(fig, OUTPUT_DIR, "图7_SHAP依赖关系")
+        save_figure(fig, OUTPUT_DIR, "图6_SHAP依赖关系")
         return tuple(sorted(OUTPUT_DIR.glob("图*.png")))
 if __name__ == "__main__":
     Solver().solve()
