@@ -97,7 +97,7 @@ def test_daily_features_uses_full_default_context_to_fill_a_continuous_month():
 
     points, daily = build_daily_features(data, predictor, target_data=target)
 
-    assert predictor.rows == len(data)
+    assert predictor.rows == 31 * 12
     assert len(points) == 28 * 12
     assert (points["treated_ntu来源"] == "MoE预测").sum() == 28 * 12
     assert daily["MoE预测观测数"].eq(12).all()

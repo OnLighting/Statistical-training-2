@@ -56,8 +56,8 @@ def _daily_grid(data):
     return grid.merge(points.drop(columns=["operating_date"], errors="ignore"), on="timestamp", how="left")
 
 
-def build_daily_features(data, moe_predictor=None, moe_context=None):
-    points = _daily_grid(data)
+def build_daily_features(data, moe_predictor=None, moe_context=None, target_data=None):
+    points = _daily_grid(data if target_data is None else target_data)
     context = _daily_grid(data if moe_context is None else moe_context)
     observed = pd.to_numeric(points["treated_ntu"], errors="coerce")
     missing = observed.isna()
@@ -72,6 +72,8 @@ def build_daily_features(data, moe_predictor=None, moe_context=None):
         predicted = pd.to_numeric(points["timestamp"].map(by_timestamp), errors="coerce")
         observed.loc[missing] = predicted.loc[missing]
     predicted_ok = missing & predicted.notna()
+    if (missing & ~predicted_ok).any():
+        raise ValueError("目标评价范围存在无法由MoE回填的treated_ntu")
     points["treated_ntu"] = observed
     points["treated_ntu来源"] = np.where(
         missing,
