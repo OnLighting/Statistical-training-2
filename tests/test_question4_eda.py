@@ -1,0 +1,330 @@
+from pathlib import Path
+import shutil
+import sys
+
+import numpy as np
+import pandas as pd
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+import question4_eda
+from question4_eda import build_daily_features, classify_q1, fit_fuzzy_clusters, fuse_grades
+
+
+class FixedMoEPredictor:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, frame):
+        self.calls += 1
+        return pd.Series(1.8, index=frame.index)
+
+
+class LowMoEPredictor:
+    def __call__(self, frame):
+        return pd.Series(0.5, index=frame.index)
+
+
+class WindowMoEPredictor:
+    def __init__(self):
+        self.rows = 0
+
+    def __call__(self, frame):
+        self.rows = len(frame)
+        values = pd.Series(np.nan, index=frame.index)
+        values.iloc[24 : len(frame) - 6] = 1.2
+        return values
+
+
+def twelve_point_frame():
+    timestamps = pd.date_range("2026-01-02 07:00", periods=12, freq="2h")
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "treated_ntu": [0.6, 1.2, 1.5, np.nan, 0.7, 1.1, 1.3, 0.8, 0.9, 1.4, 1.6, 0.5],
+        }
+    )
+
+
+def test_daily_features_keep_observations_and_mark_moe_values_with_exact_mfdl():
+    predictor = FixedMoEPredictor()
+
+    points, daily = build_daily_features(twelve_point_frame(), predictor)
+
+    assert predictor.calls == 1
+    assert points.loc[points.index[2], "treated_ntu"] == 1.5
+    assert points.loc[points.index[2], "treated_ntu来源"] == "实测"
+    assert points.loc[points.index[3], "treated_ntu"] == 1.8
+    assert points.loc[points.index[3], "treated_ntu来源"] == "MoE预测"
+    row = daily.iloc[0]
+    assert row["M"] == 0.8
+    assert row["F"] == 7 / 12
+    assert row["D"] == 6
+    assert row["L"] == 5.8
+
+
+def test_daily_features_rebuilds_the_twelve_point_grid_and_missing_breaks_runs():
+    data = pd.DataFrame(
+        {
+            "timestamp": [
+                "2026-01-02 07:00",
+                "2026-01-02 09:00",
+                "2026-01-02 09:00",
+                "2026-01-02 10:00",
+                "2026-01-02 11:00",
+            ],
+            "treated_ntu": [1.2, 1.1, np.nan, 9.0, 1.3],
+        }
+    )
+
+    points, daily = build_daily_features(data, LowMoEPredictor())
+
+    assert points["timestamp"].tolist() == list(pd.date_range("2026-01-02 07:00", periods=12, freq="2h"))
+    assert points.loc[1, "treated_ntu"] == 0.5
+    assert points.loc[1, "treated_ntu来源"] == "MoE预测"
+    assert daily.loc[0, "F"] == 2 / 12
+    assert daily.loc[0, "D"] == 2
+
+
+def test_daily_features_uses_full_default_context_to_fill_a_continuous_month():
+    timestamps = pd.date_range("2026-01-01 07:00", periods=24 + 28 * 12 + 6, freq="2h")
+    data = pd.DataFrame({"timestamp": timestamps, "treated_ntu": 0.5})
+    target = data.iloc[24 : 24 + 28 * 12].copy()
+    data.loc[target.index, "treated_ntu"] = np.nan
+    target["treated_ntu"] = np.nan
+    predictor = WindowMoEPredictor()
+
+    points, daily = build_daily_features(data, predictor, target_data=target)
+
+    assert predictor.rows == 31 * 12
+    assert len(points) == 28 * 12
+    assert (points["treated_ntu来源"] == "MoE预测").sum() == 28 * 12
+    assert daily["MoE预测观测数"].eq(12).all()
+
+
+def test_daily_features_fails_when_the_context_cannot_produce_finite_moe_values():
+    data = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-02-01 07:00", periods=12, freq="2h"),
+            "treated_ntu": np.nan,
+        }
+    )
+
+    with pytest.raises(ValueError, match="无法由MoE回填"):
+        build_daily_features(data, WindowMoEPredictor())
+
+
+def test_fuzzy_clusters_use_only_complete_observed_2025_exceedance_days():
+    daily = pd.DataFrame(
+        {
+            "运行日期": pd.date_range("2025-01-01", periods=6, freq="D"),
+            "有效观测数": [12, 12, 12, 12, 12, 11],
+            "实测观测数": [12, 12, 12, 12, 12, 11],
+            "M": [0.2, 1.1, 2.2, 3.0, 4.0, 8.0],
+            "F": [1 / 12, 3 / 12, 6 / 12, 9 / 12, 1.0, 1.0],
+            "D": [2, 6, 12, 18, 24, 22],
+            "L": [2, 4, 8, 16, 24, 22],
+        }
+    )
+
+    model = fit_fuzzy_clusters(daily)
+    classified = classify_q1(daily, model)
+
+    assert model["train_rows"] == 5
+    assert model["centers"].shape == (3, 4)
+    assert set(classified.loc[:2, "聚类风险等级"]).issubset({1, 2, 3})
+    assert classified.loc[3, "聚类风险等级"] in {1, 2, 3}
+
+
+def test_fuzzy_clusters_require_five_complete_observed_2025_exceedance_days_for_k4_diagnostics():
+    daily = pd.DataFrame(
+        {
+            "运行日期": pd.date_range("2025-01-01", periods=3, freq="D"),
+            "有效观测数": 12,
+            "实测观测数": 12,
+            "M": [0.2, 1.1, 2.2],
+            "F": [1 / 12, 3 / 12, 6 / 12],
+            "D": [2, 6, 12],
+            "L": [2, 4, 8],
+        }
+    )
+
+    with pytest.raises(ValueError, match="至少5个"):
+        fit_fuzzy_clusters(daily)
+
+
+def test_grade_fusion_keeps_safety_zero_and_never_downgrades_baseline():
+    daily = pd.DataFrame(
+        {
+            "日最大NTU": [1.0, 1.5, 2.2, 2.0],
+            "M": [0.0, 0.5, 1.2, 1.0],
+            "D": [0, 2, 2, 7],
+            "聚类风险等级": [3, 3, 1, 1],
+        }
+    )
+
+    result = fuse_grades(daily)
+
+    assert result["基准风险等级"].tolist() == [0, 1, 2, 3]
+    assert result["最终风险等级"].tolist() == [0, 3, 2, 3]
+
+
+def test_grade_fusion_uses_baseline_when_cluster_grade_is_not_present():
+    result = fuse_grades(pd.DataFrame({"日最大NTU": [1.5], "M": [0.5], "D": [2]}))
+
+    assert result["最终风险等级"].tolist() == [1]
+
+
+def test_write_outputs_creates_q1_tables_and_a_complete_march_workbook():
+    dates = pd.date_range("2026-01-01", periods=90, freq="D")
+    grades = np.resize([0, 1, 2, 3], 90)
+    daily = pd.DataFrame(
+        {
+            "运行日期": dates,
+            "M": np.where(grades == 0, 0.0, grades / 2),
+            "F": grades / 12,
+            "D": grades * 2,
+            "L": grades * 2.5,
+            "有效观测数": 12,
+            "实测观测数": 10,
+            "MoE预测观测数": 2,
+            "日最大NTU": 1 + grades / 2,
+            "基准风险等级": [0, 1, 1, 2] * 22 + [0, 1],
+            "聚类风险等级": [0, 1, 2, 1] * 22 + [0, 1],
+            "最终风险等级": grades,
+        }
+    )
+    points = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01 07:00", periods=90 * 12, freq="2h"),
+            "treated_ntu": 0.8,
+            "treated_ntu来源": "实测",
+        }
+    )
+    model = {"centers": np.zeros((3, 4)), "cluster_ranks": np.array([1, 2, 3])}
+    diagnostics = pd.DataFrame(
+        {
+            "K值": [2, 3, 4],
+            "轮廓系数": [0.1, 0.2, 0.3],
+            "Calinski-Harabasz": [1.0, 2.0, 3.0],
+            "Davies-Bouldin": [3.0, 2.0, 1.0],
+            "FPC": [0.6, 0.7, 0.8],
+        }
+    )
+
+    output_dir = ROOT / "outputs" / "04_问题4_测试输出"
+    try:
+        question4_eda.write_outputs(points, daily, model, output_dir, diagnostics)
+
+        assert (output_dir / "逐时来源.csv").is_file()
+        assert (output_dir / "2026年第一季度逐日风险分类.csv").is_file()
+        shares = pd.read_csv(output_dir / "四级风险天数占比.csv", encoding="utf-8-sig")
+        assert shares["风险等级"].tolist() == ["安全", "低风险", "中风险", "高风险"]
+        assert shares["天数"].sum() == 90
+        assert shares["占比"].sum() == pytest.approx(1)
+
+        march_path = output_dir / "2026年3月逐日风险分类.xlsx"
+        march = pd.read_excel(march_path, sheet_name="3月逐日分类")
+        assert len(march) == 31
+        assert march["日期"].tolist() == list(pd.date_range("2026-03-01", periods=31, freq="D"))
+        assert {
+            "日期", "M", "F", "D", "L", "实测观测数", "MoE预测观测数",
+            "基准风险等级", "聚类风险等级", "最终风险等级", "分类依据",
+        }.issubset(march.columns)
+        assert set(march["分类依据"]).issubset({"国标内", "阈值下限主导", "聚类预警升级", "阈值与聚类一致"})
+
+        diagnostics = pd.ExcelFile(output_dir / "风险评价诊断.xlsx")
+        assert diagnostics.sheet_names == ["聚类中心", "K值比较", "阈值敏感性"]
+        diagnostics.close()
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def output_inputs():
+    dates = pd.date_range("2026-01-01", periods=90, freq="D")
+    grades = np.resize([0, 1, 2, 3], 90)
+    daily = pd.DataFrame(
+        {
+            "运行日期": dates,
+            "M": np.where(grades == 0, 0.0, grades / 2),
+            "F": grades / 12,
+            "D": grades * 2,
+            "L": grades * 2.5,
+            "有效观测数": 12,
+            "实测观测数": 10,
+            "MoE预测观测数": 2,
+            "日最大NTU": [1.0, 1.5, 2.2, 3.5] * 22 + [1.0, 1.5],
+            "基准风险等级": [0, 1, 1, 2] * 22 + [0, 1],
+            "聚类风险等级": [3, 1, 2, 1] * 22 + [3, 1],
+            "最终风险等级": grades,
+        }
+    )
+    points = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01 07:00", periods=90 * 12, freq="2h"),
+            "treated_ntu": 0.8,
+            "treated_ntu来源": "实测",
+        }
+    )
+    training = pd.DataFrame(
+        {
+            "运行日期": pd.date_range("2025-01-01", periods=8, freq="D"),
+            "有效观测数": 12,
+            "实测观测数": 12,
+            "M": np.arange(1, 9) / 4,
+            "F": np.arange(1, 9) / 12,
+            "D": np.arange(1, 9) * 2,
+            "L": np.arange(1, 9) * 1.5,
+        }
+    )
+    return points, daily, fit_fuzzy_clusters(training)
+
+
+def test_output_diagnostics_and_figures_use_real_cluster_and_fused_sensitivity_contracts():
+    points, daily, model = output_inputs()
+    diagnostics = question4_eda.cluster_diagnostics(model)
+    output_dir = ROOT / "outputs" / "04_问题4_测试输出"
+    try:
+        question4_eda.write_outputs(points, daily, model, output_dir, diagnostics)
+
+        assert diagnostics["K值"].tolist() == [2, 3, 4]
+        assert {"轮廓系数", "Calinski-Harabasz", "Davies-Bouldin", "FPC"}.issubset(diagnostics.columns)
+        assert np.isfinite(diagnostics[["轮廓系数", "Calinski-Harabasz", "Davies-Bouldin", "FPC"]]).all().all()
+
+        centers = pd.read_excel(output_dir / "风险评价诊断.xlsx", sheet_name="聚类中心")
+        assert np.allclose(centers[["M", "F", "D", "L"]], model["original_centers"])
+        sensitivity = pd.read_excel(output_dir / "风险评价诊断.xlsx", sheet_name="阈值敏感性")
+        assert sensitivity.groupby("阈值倍率").size().to_dict() == {0.8: 4, 0.9: 4, 1.0: 4, 1.1: 4, 1.2: 4}
+        final_shares = pd.read_csv(output_dir / "四级风险天数占比.csv", encoding="utf-8-sig")
+        one_share = sensitivity.loc[sensitivity["阈值倍率"] == 1.0, ["天数", "占比"]].reset_index(drop=True)
+        assert one_share.equals(final_shares[["天数", "占比"]])
+        assert sensitivity.loc[sensitivity["阈值倍率"] == 1.0, "天数"].iloc[0] == 23
+
+        stems = ["图1_四级风险天数占比", "图2_月度风险等级分布", "图3_逐日最大NTU与风险等级"]
+        assert all((output_dir / f"{stem}.{suffix}").is_file() for stem in stems for suffix in ["png", "svg"])
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_solve_assembles_training_q1_classification_and_formal_output_directory():
+    rows = []
+    for day_number, date in enumerate(pd.date_range("2025-01-01", periods=8, freq="D"), start=1):
+        values = np.full(12, 0.8)
+        values[:day_number] = 1 + day_number / 4
+        rows.append(pd.DataFrame({"timestamp": pd.date_range(date + pd.Timedelta(hours=7), periods=12, freq="2h"), "treated_ntu": values}))
+    for day_number, date in enumerate(pd.date_range("2026-01-01", periods=90, freq="D")):
+        rows.append(pd.DataFrame({"timestamp": pd.date_range(date + pd.Timedelta(hours=7), periods=12, freq="2h"), "treated_ntu": 0.8 + (day_number % 4) / 2}))
+    data = pd.concat(rows, ignore_index=True)
+    output_dir = ROOT / "outputs" / "04_问题4_测试输出"
+    try:
+        result = question4_eda.solve(data, output_dir=output_dir)
+
+        assert len(result["daily"]) == 90
+        assert result["daily"]["运行日期"].nunique() == 90
+        assert (output_dir / "2026年第一季度逐日风险分类.csv").is_file()
+        assert (output_dir / "图3_逐日最大NTU与风险等级.svg").is_file()
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
