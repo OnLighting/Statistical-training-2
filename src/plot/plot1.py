@@ -1,3 +1,5 @@
+import os
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -7,7 +9,12 @@ import seaborn as sns
 from scipy.stats import shapiro, norm
 from statsmodels.graphics.tsaplots import plot_acf
 from statsmodels.tsa.seasonal import STL
-from ..utils import label, load_clean_data, regular_series, save_figure, set_chinese_style
+
+_PKG_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PKG_PARENT not in sys.path:
+    sys.path.insert(0, _PKG_PARENT)
+
+from utils import label, load_clean_data, regular_series, save_figure, set_chinese_style
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "01_问题1"
 CANDIDATES = [
     "river_level",
@@ -45,7 +52,7 @@ def plot_treated_ntu_series(data):
     ax.plot(daily.index, daily["max"], color="red", linewidth=0.8, alpha=0.75, label="日最大值")
     ax.axhline(1, color="black", linestyle="--", linewidth=1, label="1 NTU限值")
     ax.set_xlabel("日期")
-    ax.set_ylabel("出厂水浊度/NTU")
+    ax.set_ylabel("出厂水浊度")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.legend(frameon=True, ncol=3)
     save_figure(fig, OUTPUT_DIR, "图1_出厂水浊度日序列")
@@ -56,10 +63,10 @@ def plot_monthly_and_seasonal_distribution(data):
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.8))
     sns.boxplot(data=frame, x="月份", y="treated_ntu", color="blue", showfliers=False, ax=axes[0])
     axes[0].set_xlabel("月份")
-    axes[0].set_ylabel("出厂水浊度/NTU")
+    axes[0].set_ylabel("出厂水浊度")
     sns.violinplot(data=frame, x="季节分组", y="treated_ntu", color="green", inner="quart", cut=0, ax=axes[1])
     axes[1].set_xlabel("季节分组")
-    axes[1].set_ylabel("出厂水浊度/NTU")
+    axes[1].set_ylabel("出厂水浊度")
     save_figure(fig, OUTPUT_DIR, "图2_月份与季节分组分布")
 def plot_distribution_check(data,candidates=None,distribution_filename="图3_关键变量分布检验（3x3）",qq_filename="图4_关键变量QQ图（3x3）",color="steelblue",):
     if candidates is None:
@@ -181,7 +188,7 @@ def plot_main_scatter(data, columns):
             ax=ax,
         )
         ax.set_xlabel(label(column))
-        ax.set_ylabel("出厂水浊度/NTU")
+        ax.set_ylabel("出厂水浊度")
     save_figure(fig, OUTPUT_DIR, "图9_主要变量与出厂水浊度关系")
 def plot_periodicity(data):
     series = regular_series(data, "treated_ntu")

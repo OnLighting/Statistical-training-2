@@ -58,18 +58,12 @@ TIME_FEATURES = [
 DYNAMIC_LAGS = (1, 2, 6, 12, 84)
 ROLLING_WINDOWS = (12, 84)
 def chronological_split_by_day(frame, test_days=TEST_DAYS):
-    if test_days < 1:
-        raise ValueError("test_days 必须为正整数")
     ordered = frame.sort_values("timestamp").copy()
     operating_days = pd.to_datetime(ordered["operating_date"]).dt.normalize()
     unique_days = operating_days.drop_duplicates().sort_values().to_numpy()
-    if len(unique_days) <= test_days:
-        raise ValueError("可用运行日不足，无法划分训练集和测试集")
     test_start = pd.Timestamp(unique_days[-test_days])
     is_test = operating_days.ge(test_start)
     return ordered.loc[~is_test].copy(), ordered.loc[is_test].copy()
-
-
 def add_model_features(data):
     frame = data.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"])
@@ -85,12 +79,8 @@ def add_model_features(data):
     frame["day_of_year_cos"] = np.cos(2 * np.pi * day_of_year / 365.25)
     frame["time_trend"] = elapsed_hours / 24
     return frame.sort_values("timestamp").reset_index(drop=True)
-
-
 def quantitative_feature_screening(frame, feature_columns, top_n=8, random_state=2026):
     columns = [column for column in feature_columns if frame[column].notna().sum() >= 30]
-    if not columns:
-        raise ValueError("没有足够数据用于因素筛选")
     x = frame[columns]
     y = frame["treated_ntu"].astype(float)
     transformed_x = SimpleImputer(strategy="median").fit_transform(x)
@@ -132,19 +122,9 @@ def quantitative_feature_screening(frame, feature_columns, top_n=8, random_state
     result["综合排名"] = np.arange(1, len(result) + 1)
     result["是否入选"] = result["综合排名"].le(min(top_n, len(result)))
     return result
-def fit_and_predict_models(
-    train,
-    test,
-    feature_columns=None,
-    random_state=2026,
-):
-    # 拟合两个白盒时序模型和一个非线性模型
+def fit_and_predict_models(train,test,feature_columns=None,random_state=2026):
     if feature_columns is None:
         feature_columns = MODEL_FEATURES
-    if train["treated_ntu"].isna().any():
-        raise ValueError("训练集的出厂水浊度不能包含缺失值")
-    if test.empty:
-        raise ValueError("预测集不能为空")
     ordered_train = train.sort_values("timestamp").copy()
     ordered_test = test.sort_values("timestamp").copy()
     x_train = ordered_train[feature_columns]
@@ -191,16 +171,9 @@ def fit_and_predict_models(
         "随机森林": np.maximum(forest_model.predict(x_test), 0),
     }
     training_fits = {
-        "稳健周期时序回归": (
-            y_train.to_numpy(), np.maximum(robust_model.predict(x_train), 0)
-        ),
-        "SARIMAX": (
-            y_train.iloc[12:].to_numpy(),
-            np.maximum(np.asarray(sarimax_model.fittedvalues)[12:], 0),
-        ),
-        "随机森林": (
-            y_train.to_numpy(), np.maximum(forest_model.predict(x_train), 0)
-        ),
+        "稳健周期时序回归": (y_train.to_numpy(), np.maximum(robust_model.predict(x_train), 0)),
+        "SARIMAX": (y_train.iloc[12:].to_numpy(),np.maximum(np.asarray(sarimax_model.fittedvalues)[12:], 0)),
+        "随机森林": (y_train.to_numpy(), np.maximum(forest_model.predict(x_train), 0)),
     }
     artifacts = {
         "稳健周期时序回归": robust_model,
@@ -235,9 +208,7 @@ def evaluate_predictions(evaluation,predictions,artifacts,baseline,evaluation_na
             rows.append(_metric_row(model_name, "训练集", actual, fitted))
     evaluation_actual = evaluation["treated_ntu"].to_numpy(dtype=float)
     for model_name, predicted in predictions.items():
-        rows.append(_metric_row(
-            model_name, evaluation_name, evaluation_actual, predicted
-        ))
+        rows.append(_metric_row(model_name, evaluation_name, evaluation_actual, predicted))
     rows.append(_metric_row(
         "季节朴素基线",
         evaluation_name,
@@ -353,14 +324,10 @@ def run_modeling(data):
     forecast_output = build_forecast_output(future, selected, future_predictions)
     robust_coefficients, _, _ = model_interpretation_tables(final_artifacts)
 
-    final_screening.to_csv(OUTPUT_DIR / "表2_定量因素筛选.csv", index=False, encoding="utf-8")
-    metrics.to_csv(OUTPUT_DIR / "表3_模型评价.csv", index=False, encoding="utf-8")
+    final_screening.to_csv(OUTPUT_DIR / "表2_定量因素筛选.csv", index=False, encoding="utf")
+    metrics.to_csv(OUTPUT_DIR / "表3_模型评价.csv", index=False, encoding="utf")
     forecast_output.to_excel(OUTPUT_DIR / "表4_预测结果.xlsx", index=False)
-    robust_coefficients.to_csv(
-        OUTPUT_DIR / "表5_稳健周期回归公式系数.csv",
-        index=False,
-        encoding="utf-8",
-    )
+    robust_coefficients.to_csv(OUTPUT_DIR / "表5_稳健周期回归公式系数.csv",index=False,encoding="utf")
     return metrics, forecast_output
 def main():
     set_chinese_style()

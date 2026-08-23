@@ -1,14 +1,22 @@
+import os
+import sys
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from ..prob2 import prepare_dynamic_frame, lag_correlations, TARGET, OUTPUT_DIR, FREQUENCY_HOURS
-from ..utils import label, load_clean_data, save_figure, set_chinese_style
-def create_dynamic_overview_figure(data):
+# 让脚本以"直接执行"方式运行时也能找到同级的 prob2 / utils
+_PKG_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PKG_PARENT not in sys.path:
+    sys.path.insert(0, _PKG_PARENT)
+
+from prob2 import prepare_dynamic_frame, lag_correlations, TARGET, OUTPUT_DIR, FREQUENCY_HOURS
+from utils import label, load_clean_data, save_figure, set_chinese_style
+def plot_dynamic_overview(data):
     columns = ["raw_water_ntu", "raw_water_ph", "raw_water_flow", TARGET]
     daily = data.set_index("timestamp")[columns].resample("D").median()
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8.2), sharex=True)
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8.2))
     colors = sns.color_palette("tab10", len(columns))
     for ax, column, color in zip(axes.ravel(), columns, colors):
         ax.plot(
@@ -20,9 +28,6 @@ def create_dynamic_overview_figure(data):
         ax.set_xlabel("日期")
         ax.set_ylabel(label(column))
         ax.grid(True, linestyle="--", alpha=0.4)
-    return fig
-def plot_dynamic_overview(data):
-    fig = create_dynamic_overview_figure(data)
     save_figure(fig, OUTPUT_DIR, "图1_输入与滤后水浊度动态变化")
 def plot_lag_correlations(result):
     fig, ax = plt.subplots(figsize=(10.5, 5.2))
@@ -35,7 +40,6 @@ def plot_lag_correlations(result):
             linewidth=1.2,
             label=label(column),
         )
-    ax.axhline(0, color="#666666", linewidth=0.8)
     ax.set_xlabel("输入变量领先滤后水浊度的小时数")
     ax.set_ylabel("24小时季节差分后的相关系数")
     ax.grid(True, linestyle="--", alpha=0.4)
@@ -63,7 +67,7 @@ def create_delayed_scatter_figure(frame, best_lags):
             ax=ax,
         )
         ax.set_xlabel(f"{label(column)}（领先{lag_steps * FREQUENCY_HOURS}小时）")
-        ax.set_ylabel("滤后水浊度/NTU")
+        ax.set_ylabel("滤后水浊度")
     return fig
 def plot_delayed_scatter(frame, best_lags):
     fig = create_delayed_scatter_figure(frame, best_lags)
