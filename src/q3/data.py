@@ -60,21 +60,15 @@ class FeatureFrame(pd.DataFrame):
         if rows is None:
             return pd.DataFrame(self.loc[self.index <= boundary]).copy()
         requested = pd.DatetimeIndex(rows)
-        # if (requested > boundary).any():
-        #     raise ValueError("fitted-statistic rows must not be after fit_end")
         return pd.DataFrame(self.loc[requested]).copy()
 
 
 def prepare_q3_frame(data):
-    # if "timestamp" not in data.columns:
-    #     raise KeyError("data must contain a timestamp column")
-
     prepared = data.copy()
     prepared["timestamp"] = pd.to_datetime(prepared["timestamp"], errors="coerce")
     prepared = prepared.dropna(subset=["timestamp"]).sort_values("timestamp")
     prepared = prepared.drop_duplicates("timestamp", keep="last").set_index("timestamp")
     prepared.index.name = "timestamp"
-
     if "treated_ntu" in prepared:
         numeric_target = pd.to_numeric(prepared["treated_ntu"], errors="coerce")
         if "target_available" in prepared:
@@ -84,12 +78,10 @@ def prepare_q3_frame(data):
         else:
             available = numeric_target.notna()
         prepared["target_available"] = (available & numeric_target.notna()).astype(bool)
-
     if prepared.empty:
         empty = prepared.copy()
         empty.index = pd.DatetimeIndex([], name="timestamp")
         return empty
-
     original_columns = list(prepared.columns)
     missing_sources = [
         column
@@ -101,7 +93,6 @@ def prepare_q3_frame(data):
         f"missing_{column}": prepared[column].isna().astype(bool)
         for column in missing_sources
     }
-
     regular = pd.DataFrame(
         {column: _resample_column(prepared[column]) for column in original_columns}
     )
@@ -121,29 +112,12 @@ def prepare_q3_frame(data):
     if "target_available" in regular:
         regular["target_available"] = regular["target_available"].fillna(False).astype(bool)
         regular["missing_treated_ntu"] = ~regular["target_available"]
-
     regular.index.name = "timestamp"
     return regular.sort_index()
-
-
-# def _require_datetime_index(frame):
-#     if not isinstance(frame.index, pd.DatetimeIndex):
-#         raise TypeError("frame must use a DatetimeIndex")
-#     if not frame.index.is_unique:
-#         raise ValueError("frame index must be unique")
-
-
 def make_targets(frame, origins):
-    # """Build six direct targets at fixed two-hour horizons for each origin."""
-    # _require_datetime_index(frame)
-    # if "treated_ntu" not in frame:
-    #     raise KeyError("frame must contain treated_ntu")
-
     origin_index = pd.DatetimeIndex(origins)
-    target_index = pd.DataFrame(
-        {
-            horizon: origin_index + pd.Timedelta(hours=2 * horizon)
-            for horizon in HORIZONS
+    target_index = pd.DataFrame({
+        horizon: origin_index + pd.Timedelta(hours=2 * horizon) for horizon in HORIZONS
         },
         index=origin_index,
     )
@@ -156,27 +130,18 @@ def make_targets(frame, origins):
 
 
 def build_origins(frame, start, end):
-    # """Select origins whose 48-hour history and six labels end by ``end``."""
-    # _require_datetime_index(frame)
     start_timestamp = pd.Timestamp(start)
     end_timestamp = pd.Timestamp(end)
-    # if end_timestamp < start_timestamp:
-    #     raise ValueError("end must not precede start")
-
     latest_origin = end_timestamp - pd.Timedelta(hours=2 * max(HORIZONS))
     candidates = frame.index[(frame.index >= start_timestamp) & (frame.index <= latest_origin)]
     if not len(candidates):
         return pd.DatetimeIndex([], name=frame.index.name)
-
     positions = frame.index.get_indexer(candidates)
     has_history = positions >= HISTORY_STEPS
     targets = make_targets(frame, candidates)
     complete_target = np.isfinite(targets).all(axis=1)
     return pd.DatetimeIndex(candidates[has_history & complete_target], name=frame.index.name)
-
-
 def _prior_missing_run(missing):
-    # """Count consecutive target gaps ending immediately before each timestamp."""
     result = np.empty(len(missing), dtype=int)
     run = 0
     for position, is_missing in enumerate(missing.shift(1, fill_value=False).to_numpy(bool)):
@@ -186,17 +151,7 @@ def _prior_missing_run(missing):
             run = 0
         result[position] = run
     return pd.Series(result, index=missing.index, name="target_missing_run")
-
-
 def make_feature_frame(frame, fit_end):
-    # """Create timestamp-causal features with a fitted-statistics boundary.
-    #
-    # This operation has no fitted imputer or scaler.  Missing values remain as
-    # missing values and their indicators are emitted.  The returned
-    # :class:`FeatureFrame` keeps all prediction rows, while ``fit_rows()`` is the
-    # explicit, guarded interface for any fold-fitted statistic or transform.
-    # """
-    # _require_datetime_index(frame)
     fit_end = pd.Timestamp(fit_end)
     feature_values = {}
 
@@ -238,18 +193,13 @@ def make_feature_frame(frame, fit_end):
             feature_values[f"{column}_rollstd{window}"] = historical.rolling(
                 window, min_periods=2
             ).std()
-
     if "is_backwash_event" in frame:
         feature_values["is_backwash_event"] = frame["is_backwash_event"].fillna(False).astype(int)
     if "treated_ntu" in frame:
         target_missing = ~target_availability(frame)
         feature_values["target_missing_run"] = _prior_missing_run(target_missing)
-
     features = FeatureFrame(feature_values, index=frame.index)
     features.index.name = frame.index.name
     features.fit_end = fit_end
-
-    # Attribute documents the only admissible fitting boundary for consumers that
-    # subsequently fit an imputer/scaler to this feature matrix.
     features.attrs["fit_end"] = fit_end
     return features

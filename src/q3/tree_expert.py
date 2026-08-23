@@ -14,26 +14,8 @@ class LightGBMExpert:
     def __init__(self):
         self.is_fitted_ = False
     @staticmethod
-    def _validate_training_data(frame, origins, y):
-        origin_index = pd.DatetimeIndex(origins)
-        targets = np.asarray(y, dtype=float)
-        # if not isinstance(frame.index, pd.DatetimeIndex):
-        #     raise TypeError("frame must use a DatetimeIndex")
-        # if not frame.index.is_unique:
-        #     raise ValueError("frame index must be unique")
-        # if len(origin_index) != len(targets):
-        #     raise ValueError("origins and y must contain the same number of rows")
-        # if targets.ndim != 2 or targets.shape[1] != len(HORIZONS):
-        #     raise ValueError("y must have one column for each fixed horizon")
-        # if not origin_index.isin(frame.index).all():
-        #     raise KeyError("all origins must be present in frame.index")
-        # if not origin_index.is_monotonic_increasing or not origin_index.is_unique:
-        #     raise ValueError("origins must be unique and sorted in ascending time order")
-        # if not np.isfinite(targets).all():
-        #     raise ValueError("all training targets must be finite")
-        # if len(origin_index) < 8:
-        #     raise ValueError("at least eight training origins are required")
-        return origin_index, targets
+    def _validate_training_data(origins, y):
+        return pd.DatetimeIndex(origins), np.asarray(y, dtype=float)
 
     @staticmethod
     def _numeric_features(features, origins):
@@ -143,7 +125,7 @@ class LightGBMExpert:
         return best_parameters, best_iterations
 
     def fit(self, frame, origins, y):
-        origin_index, targets = self._validate_training_data(frame, origins, y)
+        origin_index, targets = self._validate_training_data(origins, y)
         self.feature_names_ = None
         features = make_feature_frame(frame, origin_index.max())
         x = self._numeric_features(features, origin_index)

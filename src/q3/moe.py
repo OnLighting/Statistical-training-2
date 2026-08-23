@@ -1,4 +1,3 @@
-
 import random
 
 import numpy as np
@@ -37,8 +36,6 @@ GATE_FEATURE_NAMES = GATE_FRAME_FEATURES + (
 
 
 class OOFBundle:
-    """The frozen four-fold expert outputs used to train the gate."""
-
     def __init__(self, origins, expert_predictions, gate_features, targets, metadata, gate_feature_names):
         self.origins = pd.DatetimeIndex(origins)
         self.expert_predictions = np.asarray(expert_predictions, dtype=float)
@@ -46,16 +43,8 @@ class OOFBundle:
         self.targets = np.asarray(targets, dtype=float)
         self.metadata = metadata.copy()
         self.gate_feature_names = tuple(gate_feature_names)
-
-
-def _target_missing(frame):
-    return ~target_availability(frame)
-
-
 def _mechanistic_fill_ratio(frame, filled_target, origins):
-    # if not isinstance(filled_target, pd.Series) or not filled_target.index.equals(frame.index):
-    #     raise ValueError("mechanistic filled target must align with frame")
-    missing = _target_missing(frame).to_numpy(dtype=bool)
+    missing = ~target_availability(frame).to_numpy(dtype=bool)
     filled = np.isfinite(pd.to_numeric(filled_target, errors="coerce").to_numpy(dtype=float))
     positions = frame.index.get_indexer(pd.DatetimeIndex(origins))
     ratio = np.empty(len(positions), dtype=float)
@@ -63,50 +52,21 @@ def _mechanistic_fill_ratio(frame, filled_target, origins):
         start = max(0, position - 24)
         ratio[number] = np.mean(missing[start:position] & filled[start:position])
     return ratio
-
-
 def _gate_feature_matrix(frame, train_end, origins, filled_target):
-    """Return finite, origin-causal operating features for one validation fold."""
     features = make_feature_frame(frame, train_end)
-    # missing_columns = [name for name in GATE_FRAME_FEATURES if name not in features]
-    # if missing_columns:
-    #     raise ValueError("gate feature frame is missing required causal features")
     fitting = features.fit_rows()
     medians = fitting[list(GATE_FRAME_FEATURES)].apply(pd.to_numeric, errors="coerce").median()
     medians = medians.fillna(0.0)
     values = features.loc[pd.DatetimeIndex(origins), list(GATE_FRAME_FEATURES)].apply(pd.to_numeric, errors="coerce")
     values = values.fillna(medians).fillna(0.0).to_numpy(dtype=float)
     return np.column_stack((values, _mechanistic_fill_ratio(frame, filled_target, origins)))
-
-
 def _expand_gate_features(values, expert_predictions):
     horizon = np.asarray(HORIZONS, dtype=float)
     repeated = np.repeat(values[:, None, :], len(horizon), axis=1)
     dispersion = np.std(expert_predictions, axis=2, keepdims=True)
     horizon_feature = np.broadcast_to(horizon[None, :, None], (len(values), len(horizon), 1))
     return np.concatenate((repeated, dispersion, horizon_feature), axis=2)
-
-
-# def _require_three_factories(expert_factories):
-    # if len(expert_factories) != 3:
-    #     raise ValueError("expert_factories must contain mechanistic, tree, and GRU factories")
-    # if not all(callable(factory) for factory in expert_factories):
-    #     raise TypeError("each expert factory must be callable")
-
-
 def generate_oof_predictions(frame, expert_factories):
-    """Fit the three experts on each fixed, purged expanding time fold.
-
-    The returned arrays are the only data intended for ``SoftmaxGate.fit``.
-    Every metadata row represents one origin/horizon prediction and documents
-    both the training and validation boundaries used to create it.
-    """
-    # _require_three_factories(expert_factories)
-    # if len(DEFAULT_FOLDS) != 4:
-    #     raise ValueError("OOF orchestration requires exactly four fixed expanding folds")
-    # if not isinstance(frame.index, pd.DatetimeIndex) or not frame.index.is_unique:
-    #     raise ValueError("frame must have a unique DatetimeIndex")
-
     all_origins = []
     all_predictions = []
     all_features = []
@@ -119,20 +79,11 @@ def generate_oof_predictions(frame, expert_factories):
         valid_start = pd.Timestamp(fold.valid_start)
         valid_end = pd.Timestamp(fold.valid_end)
         prior_rows = frame.index[frame.index < valid_start]
-        # if not len(prior_rows):
-        #     raise ValueError("frame must contain training rows before every fixed validation start")
         train_end = prior_rows.max()
         train_origins = build_origins(frame, frame.index.min(), train_end)
         valid_origins = build_origins(frame, valid_start, valid_end)
-        # if not len(train_origins) or not len(valid_origins):
-        #     raise ValueError("frame does not contain complete purged samples for every fixed fold")
-
         train_targets = make_targets(frame, train_origins)
         valid_targets = make_targets(frame, valid_origins)
-        # label_end = train_origins + pd.Timedelta(hours=2 * max(HORIZONS))
-        # if not (label_end < valid_start).all():
-        #     raise ValueError("training labels must end strictly before validation")
-
         validation_frame = frame.copy()
         validation_rows = validation_frame.index >= valid_start
         validation_frame.loc[validation_rows, "treated_ntu"] = np.nan
@@ -187,16 +138,12 @@ def generate_oof_predictions(frame, expert_factories):
         pd.DataFrame(metadata),
         expected_names,
     )
-
-
 class SoftmaxGate:
     LEARNING_RATE = 1e-2
     EPOCHS = 300
     BALANCE_PENALTY = 1e-3
-
     def __init__(self):
         self.is_fitted_ = False
-
     @staticmethod
     def _set_seed():
         random.seed(RANDOM_STATE)
@@ -204,7 +151,6 @@ class SoftmaxGate:
         torch.manual_seed(RANDOM_STATE)
         torch.use_deterministic_algorithms(True, warn_only=True)
         torch.set_num_threads(1)
-
     @staticmethod
     def _validate_inputs(expert_predictions, gate_features, targets=None):
         predictions = np.asarray(expert_predictions, dtype=np.float32)
@@ -213,7 +159,6 @@ class SoftmaxGate:
             return predictions, features
         target_values = np.asarray(targets, dtype=np.float32)
         return predictions, features, target_values
-
     @staticmethod
     def _flat_inputs(expert_predictions, gate_features):
         return np.concatenate((gate_features, expert_predictions), axis=2).reshape(-1, gate_features.shape[2] + 3)
@@ -253,7 +198,6 @@ class SoftmaxGate:
         self.model_.eval()
         self.is_fitted_ = True
         return self
-
     def weights(self, expert_predictions, gate_features):
         predictions, features = self._validate_inputs(expert_predictions, gate_features)
         with torch.no_grad():
