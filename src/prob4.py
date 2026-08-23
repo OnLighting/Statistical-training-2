@@ -235,38 +235,23 @@ def get_q1_daily(frame):
     result["运行日期"] = pd.to_datetime(result["运行日期"])
     result = result.loc[result["运行日期"].between("2026-01-01", "2026-03-31")].sort_values("运行日期")
     return result.reset_index(drop=True)
-def plot_out(result, daily_ntu, shares, output_dir):
+def plot_out(result, daily_ntu, output_dir):
     set_chinese_style()
-    colors = ["#91bfdb", "#fee090", "#fc8d59", "#d73027"]
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-    ax.pie(shares["天数"], labels=shares["风险等级"], autopct="%.1f%%", colors=colors, startangle=90)
-    fig.tight_layout()
-    fig.savefig(output_dir / f"图1_四级风险天数占比.png", dpi=300, bbox_inches="tight", facecolor="white")
-
-    month_labels = result["运行日期"].dt.month.map(lambda value: f"{value}月")
-    monthly = pd.crosstab(month_labels, result["风险等级"]).reindex(index=["1月", "2月", "3月"], columns=GRADE_NAMES, fill_value=0)
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    bottom = np.zeros(len(monthly))
-    for grade, color in zip(GRADE_NAMES, colors):
-        ax.bar(monthly.index, monthly[grade], bottom=bottom, label=grade, color=color)
-        bottom = bottom + monthly[grade].to_numpy()
-    ax.set_xlabel("月份")
-    ax.set_ylabel("天数")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / f"图2_月度风险等级分布.png", dpi=300, bbox_inches="tight", facecolor="white")
-
     fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(daily_ntu.index, daily_ntu.values, color="#2166ac", linewidth=1, marker="o", markersize=2.5)
-    ax.axhline(NTU_LIMIT, color="#555555", linestyle="--", linewidth=0.8)
-    ax.set_xlabel("运行日期")
+    ntu_line, = ax.plot(daily_ntu.index, daily_ntu.values, color="#2166ac", linewidth=1, marker="o", markersize=2.5, label="日最大NTU")
+    limit_line = ax.axhline(NTU_LIMIT, color="black", linestyle="--", linewidth=0.8,label=f"国标硬性条件")
+    ax.set_xlabel("日期")
     ax.set_ylabel("日最大NTU")
+    ax.grid(True,color="gray",linestyle="--",linewidth=0.8,alpha=0.3)
     right = ax.twinx()
-    right.step(result["运行日期"], result["最终风险等级"], where="mid", color="#d73027", linewidth=1)
+    right.grid(False)
+    risk_line = right.scatter(result["运行日期"], result["最终风险等级"],color='red', s=15,marker="o",label="风险等级",zorder=3,alpha=0.7)
     right.set_ylabel("风险等级")
     right.set_yticks(range(4))
+    right.set_yticklabels(["安全", "低风险", "中风险", "高风险"])
+    ax.legend(handles=[ntu_line, limit_line, risk_line],loc="upper right",frameon=True)
     fig.tight_layout()
-    fig.savefig(output_dir / f"图3_逐日最大NTU与风险等级.png", dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_dir / f"图1_逐日风险预警.png", dpi=300, bbox_inches="tight", facecolor="white")
 def write_outputs(daily, output_dir):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -290,7 +275,7 @@ def write_outputs(daily, output_dir):
     march_columns = ["日期", "风险判别分层", "聚类置信度", "基准风险等级", "聚类风险等级", "最终风险等级"]
     with pd.ExcelWriter(output_dir / "2026年3月风险分类.xlsx") as writer:
         march.reindex(columns=march_columns).to_excel(writer, index=False)
-    plot_out(result, daily_ntu, shares, output_dir)
+    plot_out(result, daily_ntu, output_dir)
 def solve(moe_predictor=None, output_dir=OUTPUT_DIR):
     data = load_clean_data()
     full_data = data.copy()
