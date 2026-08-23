@@ -120,23 +120,40 @@ def test_daily_features_fails_when_the_context_cannot_produce_finite_moe_values(
 def test_fuzzy_clusters_use_only_complete_observed_2025_exceedance_days():
     daily = pd.DataFrame(
         {
-            "运行日期": pd.date_range("2025-01-01", periods=4, freq="D"),
-            "有效观测数": [12, 12, 12, 11],
-            "实测观测数": [12, 12, 12, 11],
-            "M": [0.2, 1.1, 2.2, 8.0],
-            "F": [1 / 12, 3 / 12, 6 / 12, 1.0],
-            "D": [2, 6, 12, 22],
-            "L": [2, 4, 8, 22],
+            "运行日期": pd.date_range("2025-01-01", periods=6, freq="D"),
+            "有效观测数": [12, 12, 12, 12, 12, 11],
+            "实测观测数": [12, 12, 12, 12, 12, 11],
+            "M": [0.2, 1.1, 2.2, 3.0, 4.0, 8.0],
+            "F": [1 / 12, 3 / 12, 6 / 12, 9 / 12, 1.0, 1.0],
+            "D": [2, 6, 12, 18, 24, 22],
+            "L": [2, 4, 8, 16, 24, 22],
         }
     )
 
     model = fit_fuzzy_clusters(daily)
     classified = classify_q1(daily, model)
 
-    assert model["train_rows"] == 3
+    assert model["train_rows"] == 5
     assert model["centers"].shape == (3, 4)
     assert set(classified.loc[:2, "聚类风险等级"]).issubset({1, 2, 3})
     assert classified.loc[3, "聚类风险等级"] in {1, 2, 3}
+
+
+def test_fuzzy_clusters_require_five_complete_observed_2025_exceedance_days_for_k4_diagnostics():
+    daily = pd.DataFrame(
+        {
+            "运行日期": pd.date_range("2025-01-01", periods=3, freq="D"),
+            "有效观测数": 12,
+            "实测观测数": 12,
+            "M": [0.2, 1.1, 2.2],
+            "F": [1 / 12, 3 / 12, 6 / 12],
+            "D": [2, 6, 12],
+            "L": [2, 4, 8],
+        }
+    )
+
+    with pytest.raises(ValueError, match="至少5个"):
+        fit_fuzzy_clusters(daily)
 
 
 def test_grade_fusion_keeps_safety_zero_and_never_downgrades_baseline():

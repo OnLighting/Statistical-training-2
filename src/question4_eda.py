@@ -149,6 +149,8 @@ def fit_fuzzy_clusters(daily, clusters=3):
         & pd.to_numeric(daily["M"], errors="coerce").gt(0)
     )
     training = daily.loc[eligible, ["M", "F", "D", "L"]].copy()
+    if len(training) < 5:
+        raise ValueError("2025年完整实测超标日必须至少5个，才能完成K=4聚类诊断")
     if len(training) < clusters:
         raise ValueError("2025年完整实测超标日不足指定K值，无法进行模糊聚类")
     transformed = _cluster_features(training)
