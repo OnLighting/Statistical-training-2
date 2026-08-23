@@ -1,5 +1,10 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
+
+GRADE_NAMES = ["安全", "低风险", "中风险", "高风险"]
 
 
 def _operating_dates(frame):
@@ -202,3 +207,84 @@ def fuse_grades(daily):
     result["基准风险等级"] = baseline.astype(int)
     result["最终风险等级"] = np.where(baseline == 0, 0, np.maximum(baseline, cluster)).astype(int)
     return result
+
+
+def _classification_basis(frame):
+    baseline = pd.to_numeric(frame["基准风险等级"], errors="coerce").fillna(0).astype(int)
+    cluster = pd.to_numeric(frame["聚类风险等级"], errors="coerce").fillna(0).astype(int)
+    final = pd.to_numeric(frame["最终风险等级"], errors="coerce").fillna(0).astype(int)
+    return np.where(
+        final.eq(0),
+        "国标内",
+        np.where(
+            baseline.eq(cluster),
+            "阈值与聚类一致",
+            np.where(final.gt(baseline), "聚类预警升级", "阈值下限主导"),
+        ),
+    )
+
+
+def _grade_shares(frame, multiplier=None):
+    if multiplier is None:
+        grades = pd.to_numeric(frame["最终风险等级"], errors="coerce").fillna(0).astype(int)
+    else:
+        maximum = pd.to_numeric(frame["日最大NTU"], errors="coerce")
+        duration = pd.to_numeric(frame["D"], errors="coerce")
+        grades = np.where(
+            maximum.le(1),
+            0,
+            np.where(
+                maximum.gt(3 * multiplier) | duration.gt(6 * multiplier),
+                3,
+                np.where(maximum.gt(2 * multiplier) | duration.gt(2 * multiplier), 2, 1),
+            ),
+        )
+    counts = pd.Series(grades).value_counts().reindex(range(4), fill_value=0).sort_index()
+    result = pd.DataFrame({"风险等级": GRADE_NAMES, "天数": counts.to_numpy()})
+    result["占比"] = result["天数"] / len(frame) if len(frame) else 0.0
+    if multiplier is not None:
+        result.insert(0, "阈值倍率", multiplier)
+    return result
+
+
+def write_outputs(points, daily, model, output_dir):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source = points.copy()
+    source.to_csv(output_dir / "逐时来源.csv", index=False, encoding="utf-8-sig")
+
+    result = daily.copy()
+    result["运行日期"] = pd.to_datetime(result["运行日期"])
+    result = result.sort_values("运行日期").reset_index(drop=True)
+    result["分类依据"] = _classification_basis(result)
+    result["风险等级"] = pd.to_numeric(result["最终风险等级"], errors="coerce").fillna(0).astype(int).map(
+        dict(enumerate(GRADE_NAMES))
+    )
+    result.to_csv(output_dir / "2026年第一季度逐日风险分类.csv", index=False, encoding="utf-8-sig")
+
+    shares = _grade_shares(result)
+    shares.to_csv(output_dir / "四级风险天数占比.csv", index=False, encoding="utf-8-sig")
+
+    march_dates = pd.DataFrame({"运行日期": pd.date_range("2026-03-01", periods=31, freq="D")})
+    march = march_dates.merge(result, on="运行日期", how="left")
+    march = march.rename(columns={"运行日期": "日期"})
+    march_columns = [
+        "日期", "M", "F", "D", "L", "实测观测数", "MoE预测观测数",
+        "基准风险等级", "聚类风险等级", "最终风险等级", "分类依据",
+    ]
+    march = march.reindex(columns=march_columns)
+    with pd.ExcelWriter(output_dir / "2026年3月逐日风险分类.xlsx") as writer:
+        march.to_excel(writer, sheet_name="3月逐日分类", index=False)
+
+    centers = np.asarray(model.get("centers", np.empty((0, 4))))
+    ranks = np.asarray(model.get("cluster_ranks", np.arange(1, len(centers) + 1)))
+    center_table = pd.DataFrame(centers, columns=["M", "F", "D", "L"])
+    center_table.insert(0, "聚类", np.arange(1, len(center_table) + 1))
+    center_table["风险序号"] = ranks
+    k_table = pd.DataFrame({"K值": [2, 3, 4]})
+    sensitivity = pd.concat([_grade_shares(result, multiplier) for multiplier in [0.8, 0.9, 1.0, 1.1, 1.2]], ignore_index=True)
+    with pd.ExcelWriter(output_dir / "风险评价诊断.xlsx") as writer:
+        center_table.to_excel(writer, sheet_name="聚类中心", index=False)
+        k_table.to_excel(writer, sheet_name="K值比较", index=False)
+        sensitivity.to_excel(writer, sheet_name="阈值敏感性", index=False)

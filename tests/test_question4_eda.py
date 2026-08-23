@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import sys
 
 import numpy as np
@@ -9,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+import question4_eda
 from question4_eda import build_daily_features, classify_q1, fit_fuzzy_clusters, fuse_grades
 
 
@@ -157,3 +159,59 @@ def test_grade_fusion_uses_baseline_when_cluster_grade_is_not_present():
     result = fuse_grades(pd.DataFrame({"日最大NTU": [1.5], "M": [0.5], "D": [2]}))
 
     assert result["最终风险等级"].tolist() == [1]
+
+
+def test_write_outputs_creates_q1_tables_and_a_complete_march_workbook():
+    dates = pd.date_range("2026-01-01", periods=90, freq="D")
+    grades = np.resize([0, 1, 2, 3], 90)
+    daily = pd.DataFrame(
+        {
+            "运行日期": dates,
+            "M": np.where(grades == 0, 0.0, grades / 2),
+            "F": grades / 12,
+            "D": grades * 2,
+            "L": grades * 2.5,
+            "有效观测数": 12,
+            "实测观测数": 10,
+            "MoE预测观测数": 2,
+            "日最大NTU": 1 + grades / 2,
+            "基准风险等级": [0, 1, 1, 2] * 22 + [0, 1],
+            "聚类风险等级": [0, 1, 2, 1] * 22 + [0, 1],
+            "最终风险等级": grades,
+        }
+    )
+    points = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01 07:00", periods=90 * 12, freq="2h"),
+            "treated_ntu": 0.8,
+            "treated_ntu来源": "实测",
+        }
+    )
+    model = {"centers": np.zeros((3, 4)), "cluster_ranks": np.array([1, 2, 3])}
+
+    output_dir = ROOT / "outputs" / "04_问题4_测试输出"
+    try:
+        question4_eda.write_outputs(points, daily, model, output_dir)
+
+        assert (output_dir / "逐时来源.csv").is_file()
+        assert (output_dir / "2026年第一季度逐日风险分类.csv").is_file()
+        shares = pd.read_csv(output_dir / "四级风险天数占比.csv", encoding="utf-8-sig")
+        assert shares["风险等级"].tolist() == ["安全", "低风险", "中风险", "高风险"]
+        assert shares["天数"].sum() == 90
+        assert shares["占比"].sum() == pytest.approx(1)
+
+        march_path = output_dir / "2026年3月逐日风险分类.xlsx"
+        march = pd.read_excel(march_path, sheet_name="3月逐日分类")
+        assert len(march) == 31
+        assert march["日期"].tolist() == list(pd.date_range("2026-03-01", periods=31, freq="D"))
+        assert {
+            "日期", "M", "F", "D", "L", "实测观测数", "MoE预测观测数",
+            "基准风险等级", "聚类风险等级", "最终风险等级", "分类依据",
+        }.issubset(march.columns)
+        assert set(march["分类依据"]).issubset({"国标内", "阈值下限主导", "聚类预警升级", "阈值与聚类一致"})
+
+        diagnostics = pd.ExcelFile(output_dir / "风险评价诊断.xlsx")
+        assert diagnostics.sheet_names == ["聚类中心", "K值比较", "阈值敏感性"]
+        diagnostics.close()
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
