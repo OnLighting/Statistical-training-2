@@ -325,7 +325,7 @@ def run_modeling(data):
     robust_coefficients, _, _ = model_interpretation_tables(final_artifacts)
 
     final_screening.to_csv(OUTPUT_DIR / "表2_定量因素筛选.csv", index=False, encoding="utf")
-    metrics.to_csv(OUTPUT_DIR / "表3_模型评价.csv", index=False, encoding="utf")
+    metrics.to_csv(OUTPUT_DIR / "表3_模型评价.csv", index=False, encoding="utf-8")
     forecast_output.to_excel(OUTPUT_DIR / "表4_预测结果.xlsx", index=False)
     robust_coefficients.to_csv(OUTPUT_DIR / "表5_稳健周期回归公式系数.csv",index=False,encoding="utf")
     return metrics, forecast_output
