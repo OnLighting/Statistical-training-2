@@ -24,3 +24,6 @@ tmp/
 
 # ===== superpowers 项目产物（不在版本控制范围内） =====
 .superpowers/
+
+# ===== test相关代码 =====
+tests/
