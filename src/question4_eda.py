@@ -1,16 +1,8 @@
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
 
-ROOT = Path(__file__).resolve().parents[1]
-MODEL_DIR = ROOT / "outputs" / "03_问题3" / "models"
-
-
 def _operating_dates(frame):
-    if "operating_date" in frame:
-        return pd.to_datetime(frame["operating_date"], errors="coerce").dt.normalize()
     return (frame["timestamp"] - pd.Timedelta(hours=7)).dt.normalize()
 
 
@@ -48,40 +40,62 @@ def _question3_moe_predictor(frame):
     return prediction.reindex(pd.to_datetime(frame["timestamp"])).set_axis(frame.index)
 
 
-def build_daily_features(data, moe_predictor=None):
+def _daily_grid(data):
     points = data.copy()
     if "timestamp" not in points:
         points = points.reset_index().rename(columns={points.index.name or "index": "timestamp"})
     points["timestamp"] = pd.to_datetime(points["timestamp"], errors="coerce")
-    points = points.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    points = points.dropna(subset=["timestamp"]).sort_values("timestamp")
+    points = points.drop_duplicates("timestamp", keep="last")
+    dates = _operating_dates(points).drop_duplicates().sort_values()
+    timestamps = []
+    for date in dates:
+        timestamps.extend(pd.date_range(date + pd.Timedelta(hours=7), periods=12, freq="2h"))
+    grid = pd.DataFrame({"timestamp": timestamps})
+    grid["运行日期"] = _operating_dates(grid)
+    return grid.merge(points.drop(columns=["operating_date"], errors="ignore"), on="timestamp", how="left")
+
+
+def build_daily_features(data, moe_predictor=None, moe_context=None):
+    points = _daily_grid(data)
+    context = _daily_grid(data if moe_context is None else moe_context)
     observed = pd.to_numeric(points["treated_ntu"], errors="coerce")
     missing = observed.isna()
-    points["treated_ntu来源"] = np.where(missing, "MoE预测", "实测")
+    predicted = pd.Series(np.nan, index=points.index, dtype=float)
     if missing.any():
         predictor = moe_predictor or _question3_moe_predictor
-        predicted = predictor(points.copy())
-        if not isinstance(predicted, pd.Series):
-            predicted = pd.Series(predicted, index=points.index)
-        predicted = pd.to_numeric(predicted.reindex(points.index), errors="coerce")
+        context_prediction = predictor(context.copy())
+        if not isinstance(context_prediction, pd.Series):
+            context_prediction = pd.Series(context_prediction, index=context.index)
+        context_prediction = pd.to_numeric(context_prediction.reindex(context.index), errors="coerce")
+        by_timestamp = pd.Series(context_prediction.to_numpy(), index=context["timestamp"])
+        predicted = pd.to_numeric(points["timestamp"].map(by_timestamp), errors="coerce")
         observed.loc[missing] = predicted.loc[missing]
+    predicted_ok = missing & predicted.notna()
     points["treated_ntu"] = observed
-    points["运行日期"] = _operating_dates(points)
+    points["treated_ntu来源"] = np.where(
+        missing,
+        np.where(predicted_ok, "MoE预测", "缺失"),
+        "实测",
+    )
 
     rows = []
     for date, group in points.groupby("运行日期", sort=True):
-        values = pd.to_numeric(group["treated_ntu"], errors="coerce").dropna()
-        exceedance = values.gt(1)
+        values = pd.to_numeric(group["treated_ntu"], errors="coerce")
+        exceedance = values.gt(1) & values.notna()
         count = int(exceedance.sum())
+        excess = (values - 1).clip(lower=0)
         rows.append(
             {
                 "运行日期": date,
-                "有效观测数": int(values.size),
+                "有效观测数": int(values.notna().sum()),
                 "实测观测数": int((group["treated_ntu来源"] == "实测").sum()),
                 "MoE预测观测数": int((group["treated_ntu来源"] == "MoE预测").sum()),
-                "M": values.max() if values.size else np.nan,
-                "F": count / values.size if values.size else np.nan,
-                "D": count * 2 if values.size else np.nan,
-                "L": _longest_exceedance_run(exceedance.tolist()) * 2 if values.size else np.nan,
+                "日最大NTU": values.max() if values.notna().any() else np.nan,
+                "M": excess.max() if values.notna().any() else np.nan,
+                "F": count / 12,
+                "D": _longest_exceedance_run(exceedance.tolist()) * 2,
+                "L": excess.sum(skipna=True) * 2,
             }
         )
     daily = pd.DataFrame(rows).sort_values("运行日期").reset_index(drop=True)
@@ -120,7 +134,7 @@ def fit_fuzzy_clusters(daily):
         dates.dt.year.eq(2025)
         & daily["有效观测数"].eq(12)
         & daily["实测观测数"].eq(12)
-        & pd.to_numeric(daily["M"], errors="coerce").gt(1)
+        & pd.to_numeric(daily["M"], errors="coerce").gt(0)
     )
     training = daily.loc[eligible, ["M", "F", "D", "L"]].copy()
     if len(training) < 3:
@@ -160,7 +174,7 @@ def classify_q1(daily, model):
     membership = membership.sum(axis=2) ** -1
     cluster = membership.argmax(axis=1)
     grade = model["cluster_ranks"][cluster]
-    exceedance = pd.to_numeric(result["M"], errors="coerce").gt(1).to_numpy()
+    exceedance = pd.to_numeric(result["M"], errors="coerce").gt(0).to_numpy()
     valid = np.isfinite(values).all(axis=1)
     result["聚类风险等级"] = np.where(exceedance & valid, grade, 0).astype(int)
     return result
@@ -168,7 +182,7 @@ def classify_q1(daily, model):
 
 def fuse_grades(daily):
     result = daily.copy()
-    maximum = pd.to_numeric(result["M"], errors="coerce")
+    maximum = pd.to_numeric(result["日最大NTU"], errors="coerce")
     duration = pd.to_numeric(result["D"], errors="coerce")
     baseline = np.where(
         maximum.le(1),
