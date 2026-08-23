@@ -188,10 +188,19 @@ def test_write_outputs_creates_q1_tables_and_a_complete_march_workbook():
         }
     )
     model = {"centers": np.zeros((3, 4)), "cluster_ranks": np.array([1, 2, 3])}
+    diagnostics = pd.DataFrame(
+        {
+            "K值": [2, 3, 4],
+            "轮廓系数": [0.1, 0.2, 0.3],
+            "Calinski-Harabasz": [1.0, 2.0, 3.0],
+            "Davies-Bouldin": [3.0, 2.0, 1.0],
+            "FPC": [0.6, 0.7, 0.8],
+        }
+    )
 
     output_dir = ROOT / "outputs" / "04_问题4_测试输出"
     try:
-        question4_eda.write_outputs(points, daily, model, output_dir)
+        question4_eda.write_outputs(points, daily, model, output_dir, diagnostics)
 
         assert (output_dir / "逐时来源.csv").is_file()
         assert (output_dir / "2026年第一季度逐日风险分类.csv").is_file()
@@ -213,5 +222,92 @@ def test_write_outputs_creates_q1_tables_and_a_complete_march_workbook():
         diagnostics = pd.ExcelFile(output_dir / "风险评价诊断.xlsx")
         assert diagnostics.sheet_names == ["聚类中心", "K值比较", "阈值敏感性"]
         diagnostics.close()
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def output_inputs():
+    dates = pd.date_range("2026-01-01", periods=90, freq="D")
+    grades = np.resize([0, 1, 2, 3], 90)
+    daily = pd.DataFrame(
+        {
+            "运行日期": dates,
+            "M": np.where(grades == 0, 0.0, grades / 2),
+            "F": grades / 12,
+            "D": grades * 2,
+            "L": grades * 2.5,
+            "有效观测数": 12,
+            "实测观测数": 10,
+            "MoE预测观测数": 2,
+            "日最大NTU": [1.0, 1.5, 2.2, 3.5] * 22 + [1.0, 1.5],
+            "基准风险等级": [0, 1, 1, 2] * 22 + [0, 1],
+            "聚类风险等级": [3, 1, 2, 1] * 22 + [3, 1],
+            "最终风险等级": grades,
+        }
+    )
+    points = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01 07:00", periods=90 * 12, freq="2h"),
+            "treated_ntu": 0.8,
+            "treated_ntu来源": "实测",
+        }
+    )
+    training = pd.DataFrame(
+        {
+            "运行日期": pd.date_range("2025-01-01", periods=8, freq="D"),
+            "有效观测数": 12,
+            "实测观测数": 12,
+            "M": np.arange(1, 9) / 4,
+            "F": np.arange(1, 9) / 12,
+            "D": np.arange(1, 9) * 2,
+            "L": np.arange(1, 9) * 1.5,
+        }
+    )
+    return points, daily, fit_fuzzy_clusters(training)
+
+
+def test_output_diagnostics_and_figures_use_real_cluster_and_fused_sensitivity_contracts():
+    points, daily, model = output_inputs()
+    diagnostics = question4_eda.cluster_diagnostics(model)
+    output_dir = ROOT / "outputs" / "04_问题4_测试输出"
+    try:
+        question4_eda.write_outputs(points, daily, model, output_dir, diagnostics)
+
+        assert diagnostics["K值"].tolist() == [2, 3, 4]
+        assert {"轮廓系数", "Calinski-Harabasz", "Davies-Bouldin", "FPC"}.issubset(diagnostics.columns)
+        assert np.isfinite(diagnostics[["轮廓系数", "Calinski-Harabasz", "Davies-Bouldin", "FPC"]]).all().all()
+
+        centers = pd.read_excel(output_dir / "风险评价诊断.xlsx", sheet_name="聚类中心")
+        assert np.allclose(centers[["M", "F", "D", "L"]], model["original_centers"])
+        sensitivity = pd.read_excel(output_dir / "风险评价诊断.xlsx", sheet_name="阈值敏感性")
+        assert sensitivity.groupby("阈值倍率").size().to_dict() == {0.8: 4, 0.9: 4, 1.0: 4, 1.1: 4, 1.2: 4}
+        final_shares = pd.read_csv(output_dir / "四级风险天数占比.csv", encoding="utf-8-sig")
+        one_share = sensitivity.loc[sensitivity["阈值倍率"] == 1.0, ["天数", "占比"]].reset_index(drop=True)
+        assert one_share.equals(final_shares[["天数", "占比"]])
+        assert sensitivity.loc[sensitivity["阈值倍率"] == 1.0, "天数"].iloc[0] == 23
+
+        stems = ["图1_四级风险天数占比", "图2_月度风险等级分布", "图3_逐日最大NTU与风险等级"]
+        assert all((output_dir / f"{stem}.{suffix}").is_file() for stem in stems for suffix in ["png", "svg"])
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_solve_assembles_training_q1_classification_and_formal_output_directory():
+    rows = []
+    for day_number, date in enumerate(pd.date_range("2025-01-01", periods=8, freq="D"), start=1):
+        values = np.full(12, 0.8)
+        values[:day_number] = 1 + day_number / 4
+        rows.append(pd.DataFrame({"timestamp": pd.date_range(date + pd.Timedelta(hours=7), periods=12, freq="2h"), "treated_ntu": values}))
+    for day_number, date in enumerate(pd.date_range("2026-01-01", periods=90, freq="D")):
+        rows.append(pd.DataFrame({"timestamp": pd.date_range(date + pd.Timedelta(hours=7), periods=12, freq="2h"), "treated_ntu": 0.8 + (day_number % 4) / 2}))
+    data = pd.concat(rows, ignore_index=True)
+    output_dir = ROOT / "outputs" / "04_问题4_测试输出"
+    try:
+        result = question4_eda.solve(data, output_dir=output_dir)
+
+        assert len(result["daily"]) == 90
+        assert result["daily"]["运行日期"].nunique() == 90
+        assert (output_dir / "2026年第一季度逐日风险分类.csv").is_file()
+        assert (output_dir / "图3_逐日最大NTU与风险等级.svg").is_file()
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
