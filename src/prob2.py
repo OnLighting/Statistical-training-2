@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -6,7 +7,9 @@ import seaborn as sns
 import statsmodels.api as sm
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.stattools import acf
-from utils import label, load_clean_data, save_figure, set_chinese_style
+
+from utils import load_clean_data, save_figure, set_chinese_style
+
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "02_问题2"
 INPUTS = ["raw_water_ntu", "raw_water_ph", "alum_dosage", "raw_water_flow"]
 TARGET = "filtered_ntu"
@@ -74,7 +77,6 @@ def identify_input_lags(frame,input_columns=None,max_lag_steps=6,seasonal_period
 def lag_correlations(data, max_lag=6):
     frame = prepare_dynamic_frame(data)
     result, best_lags = identify_input_lags(frame, max_lag_steps=max_lag)
-    best_lags.to_csv(OUTPUT_DIR / "表2_初步时滞识别结果.csv", index=False, encoding="utf-8-sig")
     return result, best_lags
 def build_dynamic_design(frame, input_lags, include_target_lag=False, target_lags=None):
     design = pd.DataFrame(index=frame.index)
@@ -196,8 +198,6 @@ def fit_dynamic_models(frame, input_lags, test_fraction=0.2):
         prediction_table,
         artifacts,
     )
-
-
 def seasonal_lag_stability(frame, max_lag_steps=6):
     segments = {
         "旱季(11月至次年4月)": frame.index.month.isin([11, 12, 1, 2, 3, 4]),
@@ -215,69 +215,6 @@ def arx_parameter_table(parameters):
     return parameters.loc[
         parameters["模型"].eq("带外生输入自回归(ARX)")
     ].reset_index(drop=True)
-def create_dynamic_overview_figure(data):
-    columns = ["raw_water_ntu", "raw_water_ph", "raw_water_flow", TARGET]
-    daily = data.set_index("timestamp")[columns].resample("D").median()
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8.2), sharex=True)
-    colors = sns.color_palette("tab10", len(columns))
-    for ax, column, color in zip(axes.ravel(), columns, colors):
-        ax.plot(
-            daily.index,
-            daily[column],
-            linewidth=0.9,
-            color=color,
-        )
-        ax.set_xlabel("日期")
-        ax.set_ylabel(label(column))
-        ax.grid(True, linestyle="--", alpha=0.4)
-    return fig
-def plot_dynamic_overview(data):
-    fig = create_dynamic_overview_figure(data)
-    save_figure(fig, OUTPUT_DIR, "图1_输入与滤后水浊度动态变化")
-def plot_lag_correlations(result):
-    fig, ax = plt.subplots(figsize=(10.5, 5.2))
-    for column, group in result.groupby("变量", sort=False):
-        ax.plot(
-            group["滞后小时"],
-            group["季节差分后相关系数"],
-            marker="o",
-            markersize=3.5,
-            linewidth=1.2,
-            label=label(column),
-        )
-    ax.axhline(0, color="#666666", linewidth=0.8)
-    ax.set_xlabel("输入变量领先滤后水浊度的小时数")
-    ax.set_ylabel("24小时季节差分后的相关系数")
-    ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend(frameon=True, ncol=4, loc="upper center", bbox_to_anchor=(0.5, 1.18))
-    save_figure(fig, OUTPUT_DIR, "图2_输入变量候选时滞")
-def create_delayed_scatter_figure(frame, best_lags):
-    selected = best_lags.sort_values("季节差分后相关系数", key=lambda x: x.abs(), ascending=False).head(4)
-    fig, axes = plt.subplots(2, 2, figsize=(11, 8.5))
-    axes = axes.ravel()
-    for ax, (_, row) in zip(axes, selected.iterrows()):
-        column, lag_steps = row["变量"], int(row["滞后阶数"])
-        pair = pd.concat(
-            [frame[column].shift(lag_steps), frame[TARGET]],
-            axis=1,
-            keys=[column, TARGET],
-        ).dropna()
-        if len(pair) > 2500:
-            pair = pair.sample(2500, random_state=2026)
-        sns.regplot(
-            data=pair,
-            x=column,
-            y=TARGET,
-            scatter_kws={"s": 9, "alpha": 0.22, "color": "#4d4d4d"},
-            line_kws={"color": "#cb181d", "linewidth": 1.5},
-            ax=ax,
-        )
-        ax.set_xlabel(f"{label(column)}（领先{lag_steps * FREQUENCY_HOURS}小时）")
-        ax.set_ylabel("滤后水浊度/NTU")
-    return fig
-def plot_delayed_scatter(frame, best_lags):
-    fig = create_delayed_scatter_figure(frame, best_lags)
-    save_figure(fig, OUTPUT_DIR, "图3_时滞变量与滤后水浊度关系")
 def plot_model_validation(predictions):
     fig, ax = plt.subplots(figsize=(13, 5.4))
     ax.plot(
@@ -319,24 +256,12 @@ def plot_residual_acf(artifacts):
         ax.set_title(model_name, fontsize=10)
     axes[-1].set_xlabel("残差滞后阶数（每阶2小时）")
     save_figure(fig, OUTPUT_DIR, "图5_模型残差自相关检验")
-def plot_backwash_comparison(data):
-    frame = data.loc[
-        data[TARGET].notna(), [TARGET, "is_backwash_event"]
-    ].copy()
-    frame["事件状态"] = np.where(frame["is_backwash_event"], "反冲洗相关记录", "普通记录")
-    summary = frame.groupby("事件状态")[TARGET].agg(
-        ["count", "mean", "median", "std", "max"])
-    summary.to_csv(OUTPUT_DIR / "表3_反冲洗事件对比.csv", encoding="utf-8-sig")
 def main():
     set_chinese_style()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     data = load_clean_data()
     frame = prepare_dynamic_frame(data)
-    plot_dynamic_overview(data)
     result, best_lags = lag_correlations(data)
-    plot_lag_correlations(result)
-    plot_delayed_scatter(frame, best_lags)
-    plot_backwash_comparison(data)
     input_lags = {row["变量"]: int(row["滞后阶数"]) for _, row in best_lags.iterrows()}
     metrics, parameters, residual_tests, predictions, artifacts = fit_dynamic_models(frame, input_lags)
     metrics.to_csv(OUTPUT_DIR / "表4_动态模型评价.csv", index=False, encoding="utf-8-sig")
