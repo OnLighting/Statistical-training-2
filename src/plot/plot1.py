@@ -7,9 +7,7 @@ import seaborn as sns
 from scipy.stats import shapiro, norm
 from statsmodels.graphics.tsaplots import plot_acf
 from statsmodels.tsa.seasonal import STL
-
-from utils import label, load_clean_data, regular_series, save_figure, set_chinese_style
-
+from ..utils import label, load_clean_data, regular_series, save_figure, set_chinese_style
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "01_问题1"
 CANDIDATES = [
     "river_level",
@@ -28,8 +26,6 @@ CANDIDATES = [
     "raw_water_pump_count",
     "treated_water_pump_count",
 ]
-
-
 def select_log1p_features(data, candidates=None):
     if candidates is None:
         candidates = CANDIDATES
@@ -38,21 +34,10 @@ def select_log1p_features(data, candidates=None):
     kurtosis = data[columns].kurt()
     heavy_tail = (skewness.abs() > 1) | (kurtosis.abs() > 3)
     return [column for column in columns if bool(heavy_tail.get(column, False))]
-
-
 def apply_log1p_features(data, columns):
     transformed = data.copy()
-    invalid = [
-        column
-        for column in columns
-        if transformed[column].dropna().le(-1).any()
-    ]
-    if invalid:
-        raise ValueError(f"以下字段含有小于等于 -1 的值，不能执行 log1p：{invalid}")
     transformed.loc[:, columns] = transformed[columns].apply(np.log1p)
     return transformed
-
-
 def plot_treated_ntu_series(data):
     daily = data.set_index("timestamp")["treated_ntu"].resample("D").agg(["mean", "max"])
     fig, ax = plt.subplots(figsize=(13, 4.8))
@@ -76,13 +61,7 @@ def plot_monthly_and_seasonal_distribution(data):
     axes[1].set_xlabel("季节分组")
     axes[1].set_ylabel("出厂水浊度/NTU")
     save_figure(fig, OUTPUT_DIR, "图2_月份与季节分组分布")
-def plot_distribution_check(
-    data,
-    candidates=None,
-    distribution_filename="图3_关键变量分布检验（3x3）",
-    qq_filename="图4_关键变量QQ图（3x3）",
-    color="steelblue",
-):
+def plot_distribution_check(data,candidates=None,distribution_filename="图3_关键变量分布检验（3x3）",qq_filename="图4_关键变量QQ图（3x3）",color="steelblue",):
     if candidates is None:
         candidates = CANDIDATES
     columns = [column for column in candidates if data[column].notna().sum() >= 100]
@@ -120,16 +99,12 @@ def plot_distribution_check(
                      edgecolor="white", bins=40, ax=ax)
         mu, sigma = np.mean(values), np.std(values, ddof=1)
         x_range = np.linspace(values.min(), values.max(), 200)
-        ax.plot(x_range, norm.pdf(x_range, mu, sigma),
-                color="red", linewidth=1.6, label="正态拟合")
+        ax.plot(x_range, norm.pdf(x_range, mu, sigma),color="red", linewidth=1.6, label="正态拟合")
         p_value = float(result.loc[result["字段名"] == column, "Shapiro_p"].iloc[0])
         skewness = float(result.loc[result["字段名"] == column, "偏度"].iloc[0])
         kurtosis = float(result.loc[result["字段名"] == column, "峰度"].iloc[0])
         p_label = f"p={p_value:.1e}" if p_value < 1e-3 else f"p={p_value:.3f}"
-        ax.set_title(
-            f"{label(column)}\n偏度={skewness:.2f}  峰度={kurtosis:.2f}  Shapiro {p_label}",
-            fontsize=10
-        )
+        ax.set_title(f"{label(column)}\n偏度={skewness:.2f}  峰度={kurtosis:.2f}  Shapiro {p_label}",fontsize=10)
         ax.set_xlabel("")
         ax.set_ylabel("密度")
         ax.legend(frameon=False, fontsize=8, loc="upper right")
@@ -145,31 +120,21 @@ def plot_distribution_check(
         mu, sigma = np.mean(values), np.std(values, ddof=1)
         theoretical_scaled = theoretical * sigma + mu
         order = np.argsort(theoretical_scaled)
-        ax.scatter(theoretical_scaled[order], sorted_values,
-                   s=8, color=color, alpha=0.55, edgecolor="none")
+        ax.scatter(theoretical_scaled[order], sorted_values,s=8, color=color, alpha=0.55, edgecolor="none")
         lo = float(min(theoretical_scaled.min(), sorted_values.min()))
         hi = float(max(theoretical_scaled.max(), sorted_values.max()))
         ref = np.linspace(lo, hi, 200)
         ax.plot(ref, ref, color="red", linewidth=1.4, label="正态参考线")
         p_value = float(result.loc[result["字段名"] == column, "Shapiro_p"].iloc[0])
         p_label = f"p={p_value:.1e}" if p_value < 1e-3 else f"p={p_value:.3f}"
-        ax.set_title(
-            f"{label(column)}\nShapiro {p_label}",
-            fontsize=10
-        )
+        ax.set_title(f"{label(column)}\nShapiro {p_label}",fontsize=10)
         ax.set_xlabel("正态分位")
         ax.set_ylabel("样本分位")
         ax.legend(frameon=False, fontsize=8, loc="upper left")
     for ax in axes.ravel()[len(selected):]:
         ax.set_visible(False)
     save_figure(fig, OUTPUT_DIR, qq_filename)
-
-
-def plot_correlation_heatmap(
-    data,
-    candidates=None,
-    filename="图8_Spearman相关性热力图",
-):
+def plot_correlation_heatmap(data,candidates=None,filename="图8_Spearman相关性热力图",):
     if candidates is None:
         candidates = CANDIDATES
     columns = [column for column in candidates if data[column].notna().sum() >= 100]
@@ -179,10 +144,8 @@ def plot_correlation_heatmap(
         column for column in correlation.columns if correlation[column].isna().all()
     ]
     if all_nan_columns:
-        print(
-            "以下变量与其它列无共同非缺失时段，已从相关热力图中剔除：",
-            [label(column) for column in all_nan_columns],
-        )
+        print("以下变量与其它列无共同非缺失时段，已从相关热力图中剔除：",
+            [label(column) for column in all_nan_columns])
         correlation = correlation.drop(index=all_nan_columns, columns=all_nan_columns)
     order = correlation["treated_ntu"].abs().sort_values(ascending=False).index
     correlation = correlation.loc[order, order]

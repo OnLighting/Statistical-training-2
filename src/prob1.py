@@ -14,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-from plot1 import CANDIDATES
+from src.plot.plot1 import CANDIDATES
 from utils import label, load_clean_data, save_figure, set_chinese_style
 
 OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "01_问题1"

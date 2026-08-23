@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from prob2 import prepare_dynamic_frame, lag_correlations, TARGET, OUTPUT_DIR, FREQUENCY_HOURS
-from utils import label, load_clean_data, save_figure, set_chinese_style
+from ..prob2 import prepare_dynamic_frame, lag_correlations, TARGET, OUTPUT_DIR, FREQUENCY_HOURS
+from ..utils import label, load_clean_data, save_figure, set_chinese_style
 def create_dynamic_overview_figure(data):
     columns = ["raw_water_ntu", "raw_water_ph", "raw_water_flow", TARGET]
     daily = data.set_index("timestamp")[columns].resample("D").median()
