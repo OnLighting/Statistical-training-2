@@ -3,6 +3,7 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,25 +21,20 @@ class FixedMoEPredictor:
         return pd.Series(1.8, index=frame.index)
 
 
-class PartialMoEPredictor:
+class LowMoEPredictor:
     def __call__(self, frame):
-        values = pd.Series(np.nan, index=frame.index)
-        values.iloc[1] = 1.4
-        return values
+        return pd.Series(0.5, index=frame.index)
 
 
-class EmptyMoEPredictor:
-    def __call__(self, frame):
-        return pd.Series(np.nan, index=frame.index)
-
-
-class MonthlyMoEPredictor:
+class WindowMoEPredictor:
     def __init__(self):
         self.rows = 0
 
     def __call__(self, frame):
         self.rows = len(frame)
-        return pd.Series(1.2, index=frame.index)
+        values = pd.Series(np.nan, index=frame.index)
+        values.iloc[24 : len(frame) - 6] = 1.2
+        return values
 
 
 def twelve_point_frame():
@@ -82,35 +78,41 @@ def test_daily_features_rebuilds_the_twelve_point_grid_and_missing_breaks_runs()
         }
     )
 
-    points, daily = build_daily_features(data, EmptyMoEPredictor())
+    points, daily = build_daily_features(data, LowMoEPredictor())
 
     assert points["timestamp"].tolist() == list(pd.date_range("2026-01-02 07:00", periods=12, freq="2h"))
-    assert pd.isna(points.loc[1, "treated_ntu"])
-    assert points.loc[1, "treated_ntu来源"] == "缺失"
+    assert points.loc[1, "treated_ntu"] == 0.5
+    assert points.loc[1, "treated_ntu来源"] == "MoE预测"
     assert daily.loc[0, "F"] == 2 / 12
     assert daily.loc[0, "D"] == 2
 
 
-def test_daily_features_only_marks_finite_monthly_predictions_and_keeps_boundary_missing():
-    data = pd.DataFrame(
-        {
-            "timestamp": pd.date_range("2026-02-01 07:00", periods=28 * 12, freq="2h"),
-            "treated_ntu": np.nan,
-        }
-    )
-    predictor = MonthlyMoEPredictor()
+def test_daily_features_uses_full_default_context_to_fill_a_continuous_month():
+    timestamps = pd.date_range("2026-01-01 07:00", periods=24 + 28 * 12 + 6, freq="2h")
+    data = pd.DataFrame({"timestamp": timestamps, "treated_ntu": 0.5})
+    target = data.iloc[24 : 24 + 28 * 12].copy()
+    data.loc[target.index, "treated_ntu"] = np.nan
+    target["treated_ntu"] = np.nan
+    predictor = WindowMoEPredictor()
 
-    points, daily = build_daily_features(data, predictor)
+    points, daily = build_daily_features(data, predictor, target_data=target)
 
-    assert predictor.rows == 28 * 12
+    assert predictor.rows == len(data)
     assert len(points) == 28 * 12
     assert (points["treated_ntu来源"] == "MoE预测").sum() == 28 * 12
     assert daily["MoE预测观测数"].eq(12).all()
 
-    boundary_points, boundary_daily = build_daily_features(twelve_point_frame(), PartialMoEPredictor())
 
-    assert boundary_points.loc[3, "treated_ntu来源"] == "缺失"
-    assert boundary_daily.loc[0, "MoE预测观测数"] == 0
+def test_daily_features_fails_when_the_context_cannot_produce_finite_moe_values():
+    data = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-02-01 07:00", periods=12, freq="2h"),
+            "treated_ntu": np.nan,
+        }
+    )
+
+    with pytest.raises(ValueError, match="无法由MoE回填"):
+        build_daily_features(data, WindowMoEPredictor())
 
 
 def test_fuzzy_clusters_use_only_complete_observed_2025_exceedance_days():
