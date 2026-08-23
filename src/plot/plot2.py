@@ -1,18 +1,16 @@
+from pathlib import Path
 import os
 import sys
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-
-# 让脚本以"直接执行"方式运行时也能找到同级的 prob2 / utils
 _PKG_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
-
-from prob2 import prepare_dynamic_frame, lag_correlations, TARGET, OUTPUT_DIR, FREQUENCY_HOURS
+from prob2 import prepare_dynamic_frame, lag_correlations, TARGET, FREQUENCY_HOURS
 from utils import label, load_clean_data, save_figure, set_chinese_style
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputs" / "02_问题2"
 def plot_dynamic_overview(data):
     columns = ["raw_water_ntu", "raw_water_ph", "raw_water_flow", TARGET]
     daily = data.set_index("timestamp")[columns].resample("D").median()

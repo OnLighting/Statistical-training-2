@@ -15,7 +15,7 @@ if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
 
 from utils import label, load_clean_data, regular_series, save_figure, set_chinese_style
-OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "01_问题1"
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputs" / "01_问题1"
 CANDIDATES = [
     "river_level",
     "raw_water_flow",

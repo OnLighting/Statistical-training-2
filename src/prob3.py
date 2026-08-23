@@ -37,7 +37,7 @@ from q3.moe import (
     generate_oof_predictions,
 )
 from q3.tree_expert import LightGBMExpert
-from utils import load_clean_data, save_figure, set_chinese_style
+from utils import label, load_clean_data, save_figure, set_chinese_style
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "outputs" / "03_问题3"
@@ -94,18 +94,10 @@ class Solver:
         values = {}
         for lag in range(1, 13):
             values["filtered_ntu_lag" + str(lag)] = filtered.shift(lag)
-        values["raw_water_ntu_lag1"] = pd.to_numeric(
-            frame["raw_water_ntu"], errors="coerce"
-        ).shift(1)
-        values["raw_water_ph_lag1"] = pd.to_numeric(
-            frame["raw_water_ph"], errors="coerce"
-        ).shift(1)
-        values["alum_dosage_lag1"] = pd.to_numeric(
-            frame["alum_dosage"], errors="coerce"
-        ).shift(1)
-        values["raw_water_flow_lag2"] = pd.to_numeric(
-            frame["raw_water_flow"], errors="coerce"
-        ).shift(2)
+        values["raw_water_ntu_lag1"] = pd.to_numeric(frame["raw_water_ntu"], errors="coerce").shift(1)
+        values["raw_water_ph_lag1"] = pd.to_numeric(frame["raw_water_ph"], errors="coerce").shift(1)
+        values["alum_dosage_lag1"] = pd.to_numeric(frame["alum_dosage"], errors="coerce").shift(1)
+        values["raw_water_flow_lag2"] = pd.to_numeric(frame["raw_water_flow"], errors="coerce").shift(2)
         design = pd.DataFrame(values, index=frame.index)
         training = design.index <= pd.Timestamp(train_end)
         medians = design.loc[training].median().fillna(0.0)
@@ -133,12 +125,8 @@ class Solver:
         design = pd.DataFrame(index=frame.index)
         for lag in range(1, 13):
             design["filtered_ntu_lag" + str(lag)] = filtered.shift(lag)
-        design["raw_water_ntu_lag1"] = pd.to_numeric(
-            frame["raw_water_ntu"], errors="coerce"
-        ).shift(1)
-        design["raw_water_ph_lag1"] = pd.to_numeric(
-            frame["raw_water_ph"], errors="coerce"
-        ).shift(1)
+        design["raw_water_ntu_lag1"] = pd.to_numeric(frame["raw_water_ntu"], errors="coerce").shift(1)
+        design["raw_water_ph_lag1"] = pd.to_numeric(frame["raw_water_ph"], errors="coerce").shift(1)
         design["alum_dosage_lag1"] = pd.to_numeric(
             frame["alum_dosage"], errors="coerce"
         ).shift(1)
@@ -436,9 +424,7 @@ class Solver:
         self.gru.input_scales_ = np.asarray(gru_bundle["input_scales"])
         self.gru.is_fitted_ = True
 
-        self.gate = SoftmaxGate().load_state_dict_bundle(
-            joblib.load(MODEL_DIR / "moe_gate.joblib")
-        )
+        self.gate = SoftmaxGate().load_state_dict_bundle(joblib.load(MODEL_DIR / "moe_gate.joblib"))
         self.upstream = preprocessing.get("upstream")
         self.train_start = manifest["training_range"]["start"]
         self.train_end = pd.Timestamp(manifest["training_range"]["end"])
@@ -446,9 +432,7 @@ class Solver:
 
     def _fit_oof_and_gate(self, frame):
         self.oof = generate_oof_predictions(frame, (MechanisticExpert, LightGBMExpert, GRUExpert))
-        self.gate.fit(
-            self.oof.expert_predictions, self.oof.gate_features, self.oof.targets
-        )
+        self.gate.fit(self.oof.expert_predictions, self.oof.gate_features, self.oof.targets)
         return self.oof
 
     @staticmethod
@@ -1303,52 +1287,45 @@ class Solver:
                 self._format_worksheet(writer.book[sheet_name])
         return workbook_path
 
+    def plot_only(self):
+        self._load_models()
+        data = load_clean_data()
+        frame = prepare_q3_frame(data)
+        self._fit_oof_and_gate(frame)
+        self._evaluate_oof(frame)
+        self._predict_target_dates(frame)
+        self._run_sensitivity(frame)
+        self._plot_outputs()
+        return self.result
+
     def _plot_outputs(self):
-        # if self.result is None:
-        #     raise RuntimeError("result must be prepared before plotting outputs")
         set_chinese_style()
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-        forecast = self.result["forecast"].copy()
-        fig, ax = plt.subplots(figsize=(10.5, 5.2))
-        for date_number, (date, group) in enumerate(forecast.groupby("日期", sort=True)):
-            x = np.arange(len(group))
-            ax.plot(x, group["MoE预测NTU"], marker="o", linewidth=1.4, label=str(pd.Timestamp(date).date()))
-            ax.fill_between(
-                x,
-                group["95%下限"].to_numpy(dtype=float),
-                group["95%上限"].to_numpy(dtype=float),
-                alpha=0.10,
-                label="块保形校准95%区间" if date_number == 0 else None,
-            )
-        ax.set_xticks(range(7), ["{:02d}:00".format(hour) for hour in range(7, 20, 2)])
-        ax.set_xlabel("时刻")
-        ax.set_ylabel("出厂水浊度预测（NTU）")
-        ax.legend(frameon=False)
-        save_figure(fig, OUTPUT_DIR, "图1_指定日期预测与区间")
-
         metrics = self.result["metrics"]
         fig, ax = plt.subplots(figsize=(8.8, 4.8))
         for model, group in metrics.groupby("模型", sort=False):
+            if model == "季节朴素":
+                continue
             ax.plot(group["预测步长/小时"], group["MAE"], marker="o", linewidth=1.2, label=model)
-        ax.set_xlabel("预测步长（小时）")
-        ax.set_ylabel("MAE（NTU）")
-        ax.legend(frameon=False, ncol=3, loc="lower center", bbox_to_anchor=(0.5, 1.01))
-        save_figure(fig, OUTPUT_DIR, "图2_分步长模型误差")
+        ax.set_xlabel("预测步长/h")
+        ax.set_ylabel("MAE")
+        ax.legend(frameon=False, ncol=4, loc="upper center", bbox_to_anchor=(0.5, 1.01))
+        save_figure(fig, OUTPUT_DIR, "图3_分步长模型误差")
 
         gate = self.result["gate_weights"].set_index("预测步长/小时")
         fig, ax = plt.subplots(figsize=(8.8, 4.8))
-        gate[["机理专家权重", "LightGBM权重", "GRU权重"]].plot(
-            kind="bar", stacked=True, ax=ax, width=0.75
-        )
-        ax.set_xlabel("预测步长（小时）")
+        gate[["机理专家权重", "LightGBM权重", "GRU权重"]].plot(kind="bar", stacked=True, ax=ax, width=0.75)
+        # 2) 图4：x 轴刻度旋转 0 度，水平显示
+        ax.set_xlabel("预测步长/h")
         ax.set_ylabel("平均门控权重")
-        ax.legend(frameon=False, ncol=3)
-        save_figure(fig, OUTPUT_DIR, "图3_门控权重")
+        plt.setp(ax.get_xticklabels(), rotation=0, ha="center")
+        ax.legend(frameon=True, ncol=3, loc="upper center", bbox_to_anchor=(0.5, 1.18))
+        save_figure(fig, OUTPUT_DIR, "图4_门控权重")
 
         sensitivity = self.result["sensitivity"].copy()
         dates = list(sensitivity["目标日期"].drop_duplicates())
         fig, axes = plt.subplots(2, len(dates), figsize=(15.0, 8.0), squeeze=False)
+        scenario_mapping_records = []
         for column, date in enumerate(dates):
             group = sensitivity.loc[sensitivity["目标日期"] == date].reset_index(drop=True)
             x = np.arange(len(group))
@@ -1368,10 +1345,31 @@ class Solver:
             interval_ax.axhline(0.0, color="#555555", linewidth=0.8)
             interval_ax.set_xticks(x, group["情景"], rotation=48, ha="right")
             interval_ax.set_xlabel("工艺情景")
-        axes[0, 0].set_ylabel("预测峰值变化点估计（NTU）")
-        axes[1, 0].set_ylabel("预测峰值变化（NTU，95%区间）")
-        save_figure(fig, OUTPUT_DIR, "图4_工艺敏感性响应")
+            # 下方子图标题：第 0 个为"基准"，其余依次"变体1、变体2、..."
+            titles = ["基准"] + [f"变体{i + 1}" for i in range(len(group) - 1)]
+            for label_text, real_scenario in zip(titles, group["情景"].tolist()):
+                scenario_mapping_records.append(
+                    {
+                        "目标日期": pd.Timestamp(date).date(),
+                        "图表标题": label_text,
+                        "真实情景": real_scenario,
+                    }
+                )
+            # 每个目标日只有一列子图，给该列的下方子图设标题
+            interval_ax.set_title(" · ".join(titles), fontsize=10)
+        axes[0, 0].set_ylabel("预测峰值变化点估计/NTU")
+        axes[1, 0].set_ylabel("预测峰值变化")
+        save_figure(fig, OUTPUT_DIR, "图5_工艺敏感性响应")
+        # 保存真实场景与变体的映射
+        if scenario_mapping_records:
+            mapping_df = pd.DataFrame(scenario_mapping_records)
+            mapping_df.to_csv(
+                OUTPUT_DIR / "表7_真实场景与变体映射.csv",
+                index=False,
+                encoding="utf-8-sig",
+            )
 
+        # 4) 图6：特征使用 label() 映射为中文
         shap_global = (
             self.result["shap_importance"]
             .groupby("特征", as_index=False)["平均绝对SHAP值"]
@@ -1379,29 +1377,40 @@ class Solver:
             .nlargest(15, "平均绝对SHAP值")
             .sort_values("平均绝对SHAP值")
         )
+        shap_global["特征中文"] = shap_global["特征"].map(lambda name: label(name))
         fig, ax = plt.subplots(figsize=(9.0, 6.2))
-        ax.barh(shap_global["特征"], shap_global["平均绝对SHAP值"], color="#59A14F")
+        ax.barh(shap_global["特征中文"], shap_global["平均绝对SHAP值"], color="#59A14F")
         ax.set_xlabel("平均绝对SHAP值")
         ax.set_ylabel("特征")
-        save_figure(fig, OUTPUT_DIR, "图5_SHAP全局重要度")
+        save_figure(fig, OUTPUT_DIR, "图6_SHAP全局重要度")
 
+        # 5) 图7：x 轴使用中文；统一一个热力条（共享 colorbar）
         dependence = self.result["shap_dependence"]
-        features = list(dependence["特征"].drop_duplicates())
-        fig, axes = plt.subplots(1, max(1, len(features)), figsize=(6.2 * max(1, len(features)), 4.8), squeeze=False)
-        if not features:
-            axes[0, 0].text(0.5, 0.5, "无可用SHAP依赖数据", ha="center", va="center")
-        for ax, feature in zip(axes[0], features):
-            group = dependence.loc[dependence["特征"] == feature]
-            scatter = ax.scatter(
-                group["特征值"], group["SHAP值"],
-                c=group["预测步长/小时"], cmap="viridis", s=12, alpha=0.55,
-            )
-            ax.set_xlabel(feature)
+        dependence["特征中文"] = dependence["特征"].map(lambda name: label(name))
+        features = list(dependence["特征中文"].drop_duplicates())
+        n_features = max(1, len(features))
+        fig, axes = plt.subplots(1,n_features,figsize=(6.2 * n_features, 4.8),squeeze=False)
+        scatter_handles = []
+        for ax, feature_cn in zip(axes[0], features):
+            group = dependence.loc[dependence["特征中文"] == feature_cn]
+            scatter = ax.scatter(group["特征值"], group["SHAP值"],c=group["预测步长/小时"], cmap="viridis", s=12, alpha=0.5,)
+            ax.set_xlabel(feature_cn)
             ax.set_ylabel("SHAP值")
-            fig.colorbar(scatter, ax=ax, label="预测步长（小时）")
-        save_figure(fig, OUTPUT_DIR, "图6_SHAP依赖关系")
+            scatter_handles.append(scatter)
+        fig.colorbar(
+            scatter_handles[-1] if scatter_handles else None,
+            ax=axes[0].tolist(),
+            orientation="vertical",
+            fraction=0.025,
+            pad=0.04,
+            label="预测步长/h",
+        )
+        save_figure(fig, OUTPUT_DIR, "图7_SHAP依赖关系")
         return tuple(sorted(OUTPUT_DIR.glob("图*.png")))
-
+def test():
+    solve = Solver()
+    solve.plot_only()
 
 if __name__ == "__main__":
-    Solver().solve()
+    # Solver().solve()
+    test()
